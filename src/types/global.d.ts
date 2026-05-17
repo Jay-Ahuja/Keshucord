@@ -26,6 +26,8 @@ export interface KeshucordAPI {
     transitionToLive(broadcastId: string): Promise<YouTubeBroadcast>;
     deleteBroadcast(broadcastId: string): Promise<void>;
     deleteLiveStream(streamId: string): Promise<void>;
+    /** Aborts every in-flight YouTube request currently running in main. */
+    cancel(): Promise<void>;
   };
   settings: {
     load(): Promise<UserSettings>;

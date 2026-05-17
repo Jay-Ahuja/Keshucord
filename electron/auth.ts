@@ -11,15 +11,56 @@ const USERINFO_ENDPOINT = 'https://openidconnect.googleapis.com/v1/userinfo';
 const YOUTUBE_CHANNELS_ENDPOINT =
   'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true';
 
+/**
+ * The single YouTube scope required for everything the launch flow does:
+ *   - channels.list (read the signed-in channel)
+ *   - liveBroadcasts.insert / .bind / .transition / .delete
+ *   - liveStreams.insert / .list (ingestion + status) / .delete
+ *   - videos.update (best-effort category)
+ *
+ * `youtube.force-ssl` is a superset of `youtube` plus mandates HTTPS — Google
+ * recommends it for any app that mutates the channel over the network. It is
+ * the *only* scope that grants the live-streaming endpoints; downgrading to
+ * `youtube.readonly` would break everything from step 3 (broadcast) onward.
+ *
+ * The other scopes (`openid`, `email`, `profile`) are for the OIDC userinfo
+ * endpoint we hit during sign-in to display the user's name/avatar.
+ */
+const REQUIRED_YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube.force-ssl';
+
 const SCOPES = [
   'openid',
   'email',
   'profile',
-  'https://www.googleapis.com/auth/youtube.force-ssl',
+  REQUIRED_YOUTUBE_SCOPE,
 ];
 
 const SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
 const TOKEN_REFRESH_LEEWAY_MS = 60_000;
+const REVOKE_TIMEOUT_MS = 5_000;
+
+function log(...args: unknown[]) {
+  console.info('[auth]', ...args);
+}
+
+/**
+ * Returns true if the given `scope` string (space-separated, as returned by
+ * Google's token endpoint) grants the YouTube live-streaming capability.
+ *
+ * We check defensively because Google's consent screen lets the user uncheck
+ * individual scopes — if they uncheck "YouTube", the exchanged token will
+ * have `openid email profile` but no YouTube access, and every subsequent
+ * API call returns ACCESS_TOKEN_SCOPE_INSUFFICIENT. Detecting this at
+ * sign-in time gives us a useful error instead of a raw 403.
+ */
+function hasRequiredYouTubeScope(scope: string | undefined | null): boolean {
+  if (!scope) return false;
+  return scope.split(/\s+/).includes(REQUIRED_YOUTUBE_SCOPE);
+}
+
+const INSUFFICIENT_SCOPE_MESSAGE =
+  'Your YouTube sign-in is missing required permissions. Please sign out and sign in again to grant livestream access. ' +
+  "On the Google consent screen, make sure the 'YouTube' permission is selected.";
 
 export interface AuthUser {
   id: string;
@@ -193,6 +234,8 @@ export async function signIn(): Promise<AuthUser> {
   const { port, codePromise } = await startLoopback(state);
   const redirectUri = `http://127.0.0.1:${port}`;
 
+  log('signIn: requested scopes =', SCOPES);
+
   const authUrl = new URL(AUTH_ENDPOINT);
   const params = authUrl.searchParams;
   params.set('client_id', clientId);
@@ -202,8 +245,18 @@ export async function signIn(): Promise<AuthUser> {
   params.set('state', state);
   params.set('code_challenge', pkce.challenge);
   params.set('code_challenge_method', 'S256');
+  // `access_type=offline` + `prompt=consent` is the documented combination
+  // that guarantees Google returns a refresh_token AND re-shows the consent
+  // screen every sign-in. The latter is critical for recovering from a
+  // partial-scope state — if the user previously unchecked the YouTube
+  // permission, this forces them to re-decide rather than silently re-using
+  // the prior decision.
   params.set('access_type', 'offline');
   params.set('prompt', 'consent');
+  // Incremental authorization: include previously-granted scopes in the
+  // exchanged token. Harmless when there are no prior grants; useful when
+  // the user has previously consented to some but not all of our scopes.
+  params.set('include_granted_scopes', 'true');
 
   await shell.openExternal(authUrl.toString());
 
@@ -217,13 +270,45 @@ export async function signIn(): Promise<AuthUser> {
     redirectUri,
   });
 
+  log('signIn: granted scopes =', tokens.scope || '<missing>');
+
   if (!tokens.refresh_token) {
+    // Best-effort revoke so we don't leave a token lingering on Google's side
+    // with an inert refresh_token-less access_token still active.
+    await bestEffortRevoke(tokens.access_token);
     throw new Error(
       'Google did not return a refresh token. Revoke previous access at https://myaccount.google.com/permissions and sign in again.',
     );
   }
 
-  const user = await fetchUserProfile(tokens.access_token);
+  if (!hasRequiredYouTubeScope(tokens.scope)) {
+    log(
+      'signIn: granted scope is missing the required YouTube scope — revoking partial token and prompting re-consent. ' +
+        `granted="${tokens.scope ?? ''}", required="${REQUIRED_YOUTUBE_SCOPE}"`,
+    );
+    // Don't store these tokens — they're useless to us. Revoke them on
+    // Google's side so the user's Google account doesn't accumulate dead
+    // grants for our app.
+    await bestEffortRevoke(tokens.access_token);
+    if (tokens.refresh_token) await bestEffortRevoke(tokens.refresh_token);
+    throw new Error(INSUFFICIENT_SCOPE_MESSAGE);
+  }
+
+  let user: AuthUser;
+  try {
+    user = await fetchUserProfile(tokens.access_token);
+  } catch (err) {
+    // If the userinfo or channels.list call itself returns a 403 with an
+    // insufficient-scope reason, surface the friendly message instead of the
+    // raw Google API error.
+    if (isInsufficientScopeError(err)) {
+      log('signIn: API rejected token despite advertised scope — clearing and prompting re-consent');
+      await bestEffortRevoke(tokens.access_token);
+      if (tokens.refresh_token) await bestEffortRevoke(tokens.refresh_token);
+      throw new Error(INSUFFICIENT_SCOPE_MESSAGE);
+    }
+    throw err;
+  }
 
   await tokenStore.save({
     accessToken: tokens.access_token,
@@ -242,12 +327,30 @@ export async function signIn(): Promise<AuthUser> {
     },
   });
 
+  log(`signIn: tokens saved for "${user.email}"`);
   return user;
 }
 
 export async function getCurrentUser(): Promise<AuthUser | null> {
   const stored = await tokenStore.load();
-  if (!stored) return null;
+  if (!stored) {
+    log('getCurrentUser: no cached tokens');
+    return null;
+  }
+  // Catch the common upgrade case: tokens.enc was written by an older build
+  // that didn't request `youtube.force-ssl`, or by a sign-in where the user
+  // unchecked the YouTube permission. Refreshing a token can NEVER add a
+  // scope, so the only fix is a fresh consent flow — clear the stale cache
+  // so the next boot drops the user on the login screen.
+  if (!hasRequiredYouTubeScope(stored.scope)) {
+    log(
+      'getCurrentUser: cached tokens lack the required YouTube scope — clearing and requiring re-consent. ' +
+        `cached="${stored.scope ?? ''}", required="${REQUIRED_YOUTUBE_SCOPE}"`,
+    );
+    await tokenStore.clear();
+    return null;
+  }
+  log(`getCurrentUser: returning cached user "${stored.user.email}" (scope ok)`);
   return {
     id: stored.user.id,
     name: stored.user.name,
@@ -259,28 +362,64 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
   };
 }
 
+// Dedupe concurrent refreshes. Without this, two API calls that both land
+// inside the 60-second refresh leeway window would each POST to /token,
+// rotating the refresh_token twice — the second call's saved tokens then
+// reference a refresh_token that the first call already invalidated.
+let pendingRefresh: Promise<tokenStore.StoredTokens | null> | null = null;
+
 export async function getAccessToken(): Promise<string | null> {
   const stored = await tokenStore.load();
   if (!stored) return null;
+  // Same scope guard as getCurrentUser — a token whose scope doesn't cover
+  // the YouTube live-streaming APIs is worse than no token at all: handing
+  // it out causes every subsequent call to fail with a confusing 403 instead
+  // of cleanly bouncing the user to the login screen.
+  if (!hasRequiredYouTubeScope(stored.scope)) {
+    log(
+      'getAccessToken: cached scope insufficient — clearing tokens to force re-consent. ' +
+        `cached="${stored.scope ?? ''}"`,
+    );
+    await tokenStore.clear();
+    return null;
+  }
   if (stored.expiresAt - Date.now() > TOKEN_REFRESH_LEEWAY_MS) {
+    log(
+      `getAccessToken: reusing cached access token (expires in ${Math.round(
+        (stored.expiresAt - Date.now()) / 1000,
+      )}s)`,
+    );
     return stored.accessToken;
   }
-  const refreshed = await refresh(stored);
+  if (!pendingRefresh) {
+    log(
+      `getAccessToken: refreshing access token (${Math.round(
+        (Date.now() - stored.expiresAt) / 1000,
+      )}s past expiry / within leeway)`,
+    );
+    pendingRefresh = refresh(stored).finally(() => {
+      pendingRefresh = null;
+    });
+  } else {
+    log('getAccessToken: awaiting in-flight refresh (deduped)');
+  }
+  const refreshed = await pendingRefresh;
   return refreshed?.accessToken ?? null;
 }
 
 export async function signOut(): Promise<void> {
+  // Order matters: we attempt revoke *before* clearing local storage so that
+  // even if the revoke fetch hangs and we abort it, the disk clear that
+  // follows runs unconditionally. tokens.enc is a single encrypted blob
+  // containing access token + refresh token + cached profile, so unlinking
+  // it removes all four in one operation.
   const stored = await tokenStore.load();
   if (stored?.refreshToken) {
-    try {
-      await fetch(`${REVOKE_ENDPOINT}?token=${encodeURIComponent(stored.refreshToken)}`, {
-        method: 'POST',
-      });
-    } catch {
-      // best-effort
-    }
+    log(`signOut: revoking refresh token for "${stored.user.email}"`);
+    await bestEffortRevoke(stored.refreshToken);
   }
   await tokenStore.clear();
+  log('signOut: local token state cleared');
 }
 
 async function exchangeCode(args: {
@@ -323,21 +462,36 @@ async function refresh(stored: tokenStore.StoredTokens): Promise<tokenStore.Stor
   });
   if (!res.ok) {
     // Refresh token revoked or expired — clear local state so the user re-signs in.
+    log(`refresh: token endpoint returned ${res.status} — clearing local state`);
     await tokenStore.clear();
     return null;
   }
   const data = (await res.json()) as Omit<GoogleTokenResponse, 'refresh_token'> & {
     refresh_token?: string;
   };
+  const nextScope = data.scope ?? stored.scope;
+  // A refresh can never *add* a scope — Google issues a token with at most
+  // the scopes the refresh_token was originally consented to. So if the
+  // refreshed token doesn't include our required scope, neither did the
+  // original; bail out and require a fresh consent.
+  if (!hasRequiredYouTubeScope(nextScope)) {
+    log(
+      'refresh: refreshed token lacks required YouTube scope — clearing and requiring re-consent. ' +
+        `refreshed="${nextScope}"`,
+    );
+    await tokenStore.clear();
+    return null;
+  }
   const next: tokenStore.StoredTokens = {
     ...stored,
     accessToken: data.access_token,
     expiresAt: Date.now() + data.expires_in * 1000,
-    scope: data.scope ?? stored.scope,
+    scope: nextScope,
     tokenType: data.token_type ?? stored.tokenType,
     refreshToken: data.refresh_token ?? stored.refreshToken,
   };
   await tokenStore.save(next);
+  log(`refresh: ok (new expiresAt in ${Math.round((next.expiresAt - Date.now()) / 1000)}s)`);
   return next;
 }
 
@@ -365,9 +519,60 @@ async function fetchJson<T>(url: string, accessToken: string): Promise<T> {
   });
   if (!res.ok) {
     const text = await res.text();
+    // Detect the specific Google APIs "insufficient scopes" failure shape so
+    // sign-in can convert it into a useful user-facing message instead of
+    // surfacing the raw JSON error body. The check covers both the legacy
+    // `errors[0].reason="insufficientPermissions"` field and the newer
+    // `details[].reason="ACCESS_TOKEN_SCOPE_INSUFFICIENT"` field; Google's
+    // YouTube endpoints return one or the other depending on age of the API.
+    if (res.status === 403 && looksLikeInsufficientScope(text)) {
+      throw new InsufficientScopeError(
+        `${url} returned 403 with insufficient-scope error: ${text.slice(0, 200)}`,
+      );
+    }
     throw new Error(`${url} returned ${res.status}: ${text}`);
   }
   return (await res.json()) as T;
+}
+
+class InsufficientScopeError extends Error {
+  readonly insufficientScope = true;
+}
+
+function looksLikeInsufficientScope(body: string): boolean {
+  return (
+    body.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT') ||
+    body.includes('insufficient authentication scopes') ||
+    body.includes('"reason": "insufficientPermissions"') ||
+    body.includes('"reason":"insufficientPermissions"')
+  );
+}
+
+function isInsufficientScopeError(err: unknown): boolean {
+  return err instanceof InsufficientScopeError;
+}
+
+/**
+ * POSTs to Google's revoke endpoint, with a 5s ceiling so a sign-out flow
+ * can never hang on a network blip. Failures are logged but never thrown —
+ * the local token clear is the authoritative "you are signed out" action.
+ */
+async function bestEffortRevoke(token: string): Promise<void> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), REVOKE_TIMEOUT_MS);
+  try {
+    await fetch(`${REVOKE_ENDPOINT}?token=${encodeURIComponent(token)}`, {
+      method: 'POST',
+      signal: ac.signal,
+    });
+  } catch (err) {
+    log(
+      'bestEffortRevoke: revoke failed (continuing anyway):',
+      err instanceof Error ? err.message : err,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function callbackPage(kind: 'success' | 'error', message: string): string {

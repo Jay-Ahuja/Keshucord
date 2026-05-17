@@ -84,6 +84,8 @@ const api = {
       ipcRenderer.invoke('youtube:delete-broadcast', broadcastId),
     deleteLiveStream: (streamId: string): Promise<void> =>
       ipcRenderer.invoke('youtube:delete-stream', streamId),
+    /** Aborts every in-flight YouTube request currently running in main. */
+    cancel: (): Promise<void> => ipcRenderer.invoke('youtube:cancel'),
   },
   settings: {
     load: (): Promise<PersistedSettingsPayload> => ipcRenderer.invoke('settings:load'),

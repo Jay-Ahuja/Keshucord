@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { settingsService } from '../services';
 import type { UserSettings } from '../types';
 import { DEFAULT_USER_SETTINGS } from '../types/settings';
@@ -15,6 +15,20 @@ const SettingsContext = createContext<SettingsContextValue | null>(null);
 export function SettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_USER_SETTINGS);
   const [loaded, setLoaded] = useState(false);
+
+  // Sequential save queue. Without this, two rapid keystrokes can produce two
+  // in-flight `settingsService.save` calls whose writes race — the older
+  // payload's `fs.writeFile` may finish *after* the newer one's, leaving disk
+  // state out of sync with the optimistic React state.
+  //
+  // Strategy: chain every save onto a single tail promise so only one write
+  // hits disk at a time. Errors don't break the chain (the lock catches them
+  // for chaining purposes; the caller's promise still rejects). If a newer
+  // save arrives while one is queued, the older queued call detects that and
+  // skips its actual write — its promise resolves once the newer value has
+  // persisted, since "latest input wins" matches the user's intent.
+  const writeLock = useRef<Promise<unknown>>(Promise.resolve());
+  const latestRequestId = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,32 +48,56 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const save = useCallback(async (next: UserSettings) => {
+  const save = useCallback((next: UserSettings) => {
     // Optimistic update — UI reflects the new value immediately so toggles
     // (sidebar compact, accent swatches) feel instant rather than waiting on
-    // a disk round-trip. The `await` still resolves only after the write
-    // completes, so callers that want to render "Saved" feedback (e.g. the
-    // Settings screen) stay accurate.
+    // a disk round-trip.
     setSettings(next);
-    try {
-      await settingsService.save(next);
-    } catch (err) {
-      // Disk write failed — restore the canonical state from disk so the UI
-      // doesn't lie about what's actually persisted, then surface the error.
+    const myRequestId = ++latestRequestId.current;
+
+    const myPromise = writeLock.current.then(async () => {
+      // If a newer save() call has come in while we were queued, skip our
+      // actual write — the newer one will overwrite us anyway, and skipping
+      // avoids two back-to-back disk writes plus a guaranteed-stale write.
+      // The caller's promise still resolves successfully: their intent ("save
+      // this value or any newer one") is satisfied.
+      if (latestRequestId.current !== myRequestId) return;
       try {
-        const fresh = await settingsService.load();
-        setSettings(fresh);
-      } catch {
-        // Re-load also failed; leave the UI as-is and let the caller handle.
+        await settingsService.save(next);
+      } catch (err) {
+        // Disk write failed — restore the canonical state from disk so the UI
+        // doesn't lie about what's actually persisted, then surface the error.
+        try {
+          const fresh = await settingsService.load();
+          setSettings(fresh);
+        } catch {
+          // Re-load also failed; leave the UI as-is and let the caller handle.
+        }
+        throw err;
       }
-      throw err;
-    }
+    });
+
+    // Chain the lock onto our promise but SWALLOW errors so the next save
+    // isn't blocked on this one's failure. The caller still sees the error
+    // via `myPromise`.
+    writeLock.current = myPromise.catch(() => undefined);
+
+    return myPromise;
   }, []);
 
   const reset = useCallback(async () => {
-    const fresh = await settingsService.reset();
-    setSettings(fresh);
-    return fresh;
+    // A reset must drain any queued saves first so we don't race-overwrite
+    // the freshly-reset file. Wait for the current chain to settle, bump the
+    // request id so any in-flight coalesced saves no-op, then perform reset.
+    const drainPromise = writeLock.current.catch(() => undefined);
+    const resetPromise = drainPromise.then(async () => {
+      latestRequestId.current += 1;
+      const fresh = await settingsService.reset();
+      setSettings(fresh);
+      return fresh;
+    });
+    writeLock.current = resetPromise.catch(() => undefined);
+    return resetPromise;
   }, []);
 
   return (

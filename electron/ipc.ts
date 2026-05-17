@@ -41,4 +41,10 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('youtube:delete-stream', (_e, streamId: string) =>
     youtube.deleteLiveStream(streamId),
   );
+  // Renderer-driven abort: AbortSignal can't cross IPC, so when the launch
+  // orchestrator aborts we instead fire this channel to interrupt any
+  // in-flight YouTube fetches on the main side.
+  ipcMain.handle('youtube:cancel', () => {
+    youtube.cancelAllInFlight();
+  });
 }

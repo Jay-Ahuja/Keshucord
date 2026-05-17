@@ -1,6 +1,7 @@
 import { app, safeStorage } from 'electron';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { atomicWrite } from './atomicWrite';
 
 export interface StoredUser {
   id: string;
@@ -32,7 +33,9 @@ export async function save(tokens: StoredTokens): Promise<void> {
     );
   }
   const encrypted = safeStorage.encryptString(JSON.stringify(tokens));
-  await fs.writeFile(tokenFile(), encrypted, { mode: 0o600 });
+  // Atomic write via tmp+rename — a crash mid-write can no longer corrupt
+  // tokens.enc and force the user to re-sign-in on next boot.
+  await atomicWrite(tokenFile(), encrypted, 0o600);
 }
 
 export async function load(): Promise<StoredTokens | null> {

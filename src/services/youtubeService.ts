@@ -100,6 +100,21 @@ export async function deleteLiveStream(streamId: string): Promise<void> {
   await window.keshucord.youtube.deleteLiveStream(streamId);
 }
 
+/**
+ * Best-effort interrupt of any in-flight YouTube fetches running in the main
+ * process. The launch orchestrator calls this when its AbortSignal fires so
+ * that aborts don't have to wait out a stalled API request. Safe to call when
+ * nothing is in flight (it's a no-op on the main side).
+ */
+export async function cancel(): Promise<void> {
+  try {
+    await window.keshucord.youtube.cancel();
+  } catch {
+    // Cancel is best-effort — if the IPC itself fails, the in-flight fetches
+    // will still time out via the per-attempt timeout in electron/youtube.ts.
+  }
+}
+
 export async function transitionToLive(broadcast: YouTubeBroadcast): Promise<YouTubeBroadcast> {
   const updated = await window.keshucord.youtube.transitionToLive(broadcast.id);
   return {
