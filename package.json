@@ -1,0 +1,37 @@
+{
+  "name": "keshucord",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Launch a YouTube live stream with one click",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n vite,electron -c magenta,cyan \"npm:dev:vite\" \"npm:dev:electron\"",
+    "dev:vite": "vite",
+    "dev:electron": "wait-on tcp:5173 && npm run build:electron && cross-env NODE_ENV=development electron .",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:renderer": "vite build",
+    "build": "npm run build:renderer && npm run build:electron",
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.19",
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^31.0.0",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.4",
+    "typescript": "^5.4.5",
+    "vite": "^5.3.0",
+    "wait-on": "^7.2.0"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "obs-websocket-js": "^5.0.8",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

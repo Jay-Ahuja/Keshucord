@@ -1,0 +1,28 @@
+/*
+ * Keshucord base styles.
+ *
+ * Tailwind preflight + utilities are still loaded here — App.tsx's bootstrap
+ * spinner uses a handful of Tailwind utility classes for layout. All the
+ * design's tokens + component classes live in `./styles/keshucord.css`
+ * (imported from main.tsx) and load AFTER this file so they win on any
+ * conflicting rule.
+ *
+ * Earlier phases also defined legacy `.app-shell`, `.glass-card`,
+ * `.btn-primary`, `.btn-ghost`, `.field-*` rules in this file. They've all
+ * been deleted — every screen now uses keshucord's `.page`, `.card`, `.btn`,
+ * `.input` etc. directly.
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}

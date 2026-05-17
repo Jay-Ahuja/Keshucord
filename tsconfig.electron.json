@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "outDir": "dist-electron",
+    "rootDir": "electron",
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "sourceMap": true
+  },
+  "include": ["electron/**/*"]
+}
