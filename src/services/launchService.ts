@@ -93,9 +93,16 @@ export async function runLaunchSequence(opts: RunLaunchOptions): Promise<YouTube
   activeAbort = myAbort;
 
   const mergedController = new AbortController();
-  const propagate = () => mergedController.abort();
+  // When the merged signal fires, also reach into main and abort any in-flight
+  // YouTube fetches. AbortSignal can't cross IPC, so without this an aborted
+  // launch would have to wait out each running fetch's per-attempt timeout
+  // (up to 20s × 3 retries) before unwinding.
+  const propagate = () => {
+    mergedController.abort();
+    void youtube.cancel().catch(() => undefined);
+  };
   if (opts.signal) {
-    if (opts.signal.aborted) mergedController.abort();
+    if (opts.signal.aborted) propagate();
     else opts.signal.addEventListener('abort', propagate, { once: true });
   }
   myAbort.signal.addEventListener('abort', propagate, { once: true });
@@ -124,17 +131,18 @@ async function _runLaunchSequence({
 }: RunLaunchOptions): Promise<YouTubeBroadcast> {
   const run = async <T>(stepId: LaunchStepId, work: () => Promise<T>): Promise<T> => {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    const startedAt = Date.now();
     log(`step:start ${stepId}`);
     onEvent({ type: 'step:start', stepId });
     try {
       const result = await work();
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      log(`step:done  ${stepId}`);
+      log(`step:done  ${stepId} (${Date.now() - startedAt}ms)`);
       onEvent({ type: 'step:done', stepId });
       return result;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      log(`step:error ${stepId}: ${error.message}`);
+      log(`step:error ${stepId} (${Date.now() - startedAt}ms): ${error.message}`);
       onEvent({ type: 'step:error', stepId, error });
       throw error;
     }
@@ -144,6 +152,15 @@ async function _runLaunchSequence({
   // the catch block can clean them up on failure or abort.
   let broadcast: YouTubeBroadcast | null = null;
   let stream: YouTubeLiveStream | null = null;
+  const launchStart = Date.now();
+  // Track how far the OBS-side steps got. The cleanup branch uses this to
+  // decide whether to drop the OBS connection — connected/configured failures
+  // need a clean re-handshake on the next launch (otherwise the next attempt
+  // inherits a possibly half-dead WebSocket), but a 'streaming' failure is
+  // left alone per the documented invariant ("never auto-stop a live stream
+  // on a flaky go-live"). See docs/launch-flow.md §8.
+  type ObsProgress = 'none' | 'connected' | 'configured' | 'streaming';
+  let obsProgress = 'none' as ObsProgress;
 
   try {
     // 1. Validate the form a final time on the orchestrator side — defends
@@ -192,18 +209,20 @@ async function _runLaunchSequence({
 
     // 7. Connect to OBS over WebSocket. Retry a couple of times in case OBS
     //    is still finishing its startup handshake.
-    await run('connect-obs', () =>
-      obs.connect(settings.obsPassword, { attempts: 3, retryDelayMs: 1500 }),
-    );
+    await run('connect-obs', async () => {
+      await obs.connect(settings.obsPassword, { attempts: 3, retryDelayMs: 1500 });
+      obsProgress = 'connected';
+    });
 
     // 8. Send the YouTube credentials to OBS via SetStreamServiceSettings.
     //    `configureStreamService` poll-verifies via GetStreamServiceSettings.
-    await run('configure-obs', () =>
-      obs.configureStreamService({
+    await run('configure-obs', async () => {
+      await obs.configureStreamService({
         rtmpUrl: ingestion.rtmpUrl,
         streamKey: ingestion.streamKey,
-      }),
-    );
+      });
+      obsProgress = 'configured';
+    });
 
     // 9. Tell OBS to start the actual RTMP push.
     //    BEFORE sending the irrevocable StartStream command, do one final
@@ -217,7 +236,9 @@ async function _runLaunchSequence({
         rtmpUrl: ingestion.rtmpUrl,
         streamKey: ingestion.streamKey,
       });
-      return obs.startStreaming();
+      const result = await obs.startStreaming();
+      obsProgress = 'streaming';
+      return result;
     });
 
     // 10. Wait for YouTube to recognise the stream as active, then transition
@@ -247,14 +268,17 @@ async function _runLaunchSequence({
       return youtube.transitionToLive(broadcast!);
     });
 
-    log('launch complete — broadcast is live');
+    log(`launch complete — broadcast is live (total ${Date.now() - launchStart}ms)`);
     onEvent({ type: 'complete', broadcast: liveBroadcast });
     return liveBroadcast;
   } catch (err) {
-    // Clean up any orphaned YouTube resources before re-throwing so the user
-    // doesn't accumulate dead broadcasts/streams from failed launches or
-    // mid-launch navigation. Runs in parallel so one cleanup failing doesn't
-    // mask the original error or block the other.
+    // Clean up any orphaned YouTube resources + roll back OBS state before
+    // re-throwing so the user doesn't accumulate dead broadcasts/streams from
+    // failed launches or mid-launch navigation. Each YouTube delete is
+    // internally retried up to 3× on transient 5xx/429 by the main-process
+    // `callDelete` helper, so a single network blip during cleanup no longer
+    // leaves an orphan on the user's channel. Runs in parallel so one cleanup
+    // failing doesn't mask the original error or block the other.
     const deleted: string[] = [];
     const tasks: Promise<unknown>[] = [];
     if (broadcast) {
@@ -284,6 +308,46 @@ async function _runLaunchSequence({
         onEvent({ type: 'cleanup', deleted });
       }
     }
+
+    // OBS state hygiene. Two branches:
+    //
+    //  - 'connected' / 'configured': we opened a WebSocket and possibly wrote
+    //    a stream-service config pointing at the now-deleted broadcast. Drop
+    //    the connection so the next launch starts from a clean slate.
+    //
+    //  - 'streaming': step 9 (start-stream) succeeded but a later step failed
+    //    — OBS is actively pushing RTMP to a broadcast we're about to delete.
+    //    Stop it. This contradicts the "never auto-stop a live stream"
+    //    invariant in docs/launch-flow.md §8, but only superficially: that
+    //    invariant assumes the broadcast might still be salvageable. In the
+    //    cleanup branch the broadcast is being deleted unconditionally, so
+    //    leaving OBS pushing to a tombstoned endpoint is strictly worse than
+    //    a graceful stop (the user gets a frozen-LIVE chip and a failed RTMP
+    //    output instead).
+    if (obsProgress === 'streaming') {
+      if (obs.getStatus().state === 'streaming') {
+        log('launch-cleanup: OBS is streaming after a failed launch — stopping it before deleting broadcast');
+        try {
+          await obs.stopStreaming();
+        } catch (stopErr) {
+          console.warn(
+            '[launch] failed to stop OBS streaming during cleanup:',
+            stopErr instanceof Error ? stopErr.message : stopErr,
+          );
+        }
+      }
+    } else if (obsProgress === 'connected' || obsProgress === 'configured') {
+      const obsState = obs.getStatus().state;
+      if (obsState === 'connected' || obsState === 'connecting') {
+        log(`launch-cleanup: forcing OBS disconnect (obsProgress="${obsProgress}", obsState="${obsState}")`);
+        try {
+          await obs.disconnect();
+        } catch (disconnectErr) {
+          console.warn('[launch] failed to disconnect OBS during cleanup:', disconnectErr);
+        }
+      }
+    }
+
     throw err;
   }
 }
