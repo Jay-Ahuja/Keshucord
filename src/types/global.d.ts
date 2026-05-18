@@ -36,22 +36,31 @@ export interface KeshucordAPI {
   };
   /**
    * OBS process control — pre-flight gate uses these to launch OBS if it
-   * isn't already running. Frozen contract owned by the main-process side
-   * (see electron/obs.ts in Agent A's branch).
+   * isn't already running. Main-process implementation lives in
+   * `electron/obsProcess.ts`.
    */
   obs: {
     /**
-     * Cheap check used by the renderer-side preflight before deciding to
-     * show the launch-OBS dialog. Implementation MAY be a port probe; it
-     * MUST NOT mutate any OBS WebSocket state.
+     * Whether an OBS process is currently running on this OS. Implemented
+     * as a process-table check (tasklist / pgrep) in the main process —
+     * NOT a port probe. MUST NOT mutate any OBS WebSocket state.
+     *
+     * Note: a `true` result only means the OBS *process* exists. The OBS
+     * WebSocket server may not yet be accepting connections (e.g. during
+     * startup, or if the user disabled it in OBS settings). For
+     * "is OBS actually reachable?" callers should use
+     * `obsService.probe()` (raw WebSocket open) in the renderer.
      */
     isRunning(): Promise<boolean>;
     /**
      * Spawn OBS via the main process. Returns `{ok: true}` if the launch
      * command was issued successfully; returns `{ok: false, reason}` with
      * a user-displayable string on failure (binary missing, permission
-     * denied, etc). Does NOT wait for OBS to finish starting — callers
-     * must poll `isRunning()` themselves.
+     * denied, etc). Does NOT wait for OBS to finish starting — for
+     * readiness, callers should poll OBS WebSocket reachability via
+     * `obsService.probe()` rather than `isRunning()`, since the process
+     * exists before the WebSocket server binds its port.
+     * `obsService.launchAndWait()` wraps this with the polling loop.
      */
     launch(): Promise<{ ok: true } | { ok: false; reason: string }>;
   };
