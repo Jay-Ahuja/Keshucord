@@ -9,7 +9,7 @@
 ```
 Renderer (React, sandboxed Chromium)
   │
-  │  window.keshucord.{auth,youtube,settings}.*()
+  │  window.keshucord.{auth,youtube,settings,obs}.*()
   │  Typed as KeshucordAPI in src/types/global.d.ts
   │
   ▼
@@ -28,6 +28,7 @@ Implementation modules
   electron/auth.ts          (auth channels)
   electron/settingsStore.ts (settings channels)
   electron/youtube.ts       (youtube channels)
+  electron/obsProcess.ts    (obs channels — OS-process detection + spawn)
 ```
 
 All IPC is **request/response** via `ipcMain.handle` + `ipcRenderer.invoke`.
@@ -68,8 +69,41 @@ directly — only the `window.keshucord` object exposed by the preload.
 | `youtube:transition-live` | `window.keshucord.youtube.transitionToLive(broadcastId)` | `youtube.transitionToLive(broadcastId)` | `YouTubeBroadcastPayload` |
 | `youtube:delete-broadcast` | `window.keshucord.youtube.deleteBroadcast(broadcastId)` | `youtube.deleteBroadcast(broadcastId)` | `void` |
 | `youtube:delete-stream` | `window.keshucord.youtube.deleteLiveStream(streamId)` | `youtube.deleteLiveStream(streamId)` | `void` |
+| `youtube:cancel` | `window.keshucord.youtube.cancel()` | `youtube.cancelAllInFlight()` | `void` |
 
-**Total: 14 channels.** 3 auth + 3 settings + 8 YouTube.
+`youtube:cancel` is the renderer-driven abort path. An `AbortSignal` cannot
+cross the IPC boundary, so when the launch orchestrator aborts mid-flight
+the renderer fires this channel to interrupt every in-flight YouTube fetch
+on the main side.
+
+### 2.4 OBS namespace
+
+| Channel | Preload call | Main handler | Returns |
+|---|---|---|---|
+| `obs:is-running` | `window.keshucord.obs.isRunning()` | `obsProcess.isObsRunning()` | `boolean` |
+| `obs:launch` | `window.keshucord.obs.launch()` | `obsProcess.launchObs()` | `{ ok: true } \| { ok: false, reason: string }` |
+
+These two channels back the OBS pre-flight gate that runs **before**
+`runLaunchSequence` is invoked (see `src/screens/CreateScreen.tsx` and
+`src/components/ObsLaunchDialog.tsx`). They are deliberately distinct from
+the renderer-side OBS WebSocket — see §9 below — and only deal with the OS
+process: is the `obs64.exe` / `OBS` / `obs` process alive, and if not, can
+we spawn it?
+
+- `obs:is-running` shells out to `tasklist` (Windows), `pgrep -x OBS`
+  (macOS), or `pgrep -x obs` (Linux). Detection is bounded by a 2-second
+  hard timeout; any error or timeout is treated as "not running" because
+  the safe fall-through is a follow-up `obs:launch` call.
+- `obs:launch` spawns OBS detached + `unref`-ed so quitting Keshucord does
+  not also kill OBS. On Windows it resolves the install path via
+  `HKLM\SOFTWARE\OBS Studio` with a `C:\Program Files\obs-studio` fallback
+  and sets `cwd` to `bin/64bit/` (OBS crashes silently otherwise). On
+  macOS it delegates to `open -a OBS`. On Linux it assumes `obs` is on
+  `PATH`. The renderer must NOT use this to decide that OBS is ready —
+  spawn returns as soon as the OS hand-off succeeds; reachability is
+  the renderer's responsibility (see `obsService.launchAndWait`).
+
+**Total: 17 channels.** 3 auth + 3 settings + 9 YouTube + 2 OBS.
 
 ## 3. Payload types
 
@@ -135,6 +169,23 @@ interface StreamIngestionInfoPayload {
   backupRtmpUrl?: string;
 }
 ```
+
+### OBS launch result
+
+```ts
+// electron/preload.ts
+type ObsLaunchResultPayload =
+  | { ok: true }
+  | { ok: false; reason: string };
+```
+
+Returned by `obs:launch`. On success the renderer knows the spawn was
+handed off to the OS — it must still poll `obs:is-running` (or, in
+practice, the OBS WebSocket port via `obsService.probe()`) to confirm
+reachability before treating OBS as ready. On failure the `reason` is a
+user-displayable string suitable for rendering directly in the
+launch-OBS dialog (e.g. "OBS Studio is not installed at the expected
+location"). No further mapping is needed.
 
 ### Settings
 
@@ -245,7 +296,8 @@ app.whenReady().then(() => {
 |---|---|
 | `auth` | `sign-in`, `sign-out`, `get-current-user` |
 | `settings` | `load`, `save`, `reset` |
-| `youtube` | `create-broadcast`, `create-stream`, `bind`, `get-ingestion`, `get-stream-status`, `transition-live`, `delete-broadcast`, `delete-stream` |
+| `youtube` | `create-broadcast`, `create-stream`, `bind`, `get-ingestion`, `get-stream-status`, `transition-live`, `delete-broadcast`, `delete-stream`, `cancel` |
+| `obs` | `is-running`, `launch` |
 
 When adding a new channel:
 1. Add `ipcMain.handle('<ns>:<verb>', …)` in `electron/ipc.ts`.
@@ -256,7 +308,13 @@ When adding a new channel:
 
 ## 9. What is NOT over IPC
 
-OBS WebSocket communication is **entirely renderer-side**. `obsService`
+OBS **WebSocket** communication is entirely renderer-side. `obsService`
 (`src/services/obsService.ts`) connects directly to `ws://localhost:4455`
-using the browser's native `WebSocket`. No OBS calls touch the main
-process. See [`obs-flow.md`](./obs-flow.md) for why.
+using the browser's native `WebSocket`. No OBS WebSocket calls touch the
+main process. See [`obs-flow.md`](./obs-flow.md) for why.
+
+The `obs:is-running` / `obs:launch` IPC channels added in 0.2.0 are NOT a
+deviation from this rule — they deal with the OS-level OBS *process* (is
+the executable running? can we spawn it?), which inherently requires
+Node's `child_process` and a Windows registry read, both main-process-only
+capabilities. The renderer's WebSocket layer is unchanged.
