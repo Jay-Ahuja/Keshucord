@@ -291,15 +291,10 @@ unannounced to the user.
 
 ## 8. Platform
 
-### No packager configured [limitation]
+### Code signing pending [limitation]
 
-There is no `electron-builder` or `electron-forge` config. The app runs
-in development mode (`npm run dev`) and can be started from a built state
-(`npm run build && npm start`), but there is no `.exe` installer or
-auto-update mechanism.
-
-### No code signing [limitation]
-
-Unsigned builds will show an OS security warning on Windows ("Windows
-protected your PC") and macOS (Gatekeeper). Not relevant during
-development but required before distributing to end users.
+Code signing pending — Windows EV cert + Apple Developer cert required
+before distributing to non-developer users. Tracked as a follow-up;
+installers produced by `npm run build:installer` are currently unsigned
+and will show an OS security warning on Windows ("Windows protected your
+PC") and macOS (Gatekeeper). Auto-update is also not wired up.

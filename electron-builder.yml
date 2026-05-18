@@ -1,0 +1,18 @@
+productName: Keshucord
+appId: com.keshucord.app
+directories:
+  output: dist-builder
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+asar: true
+win:
+  target: nsis
+mac:
+  target: dmg
+  category: public.app-category.video
+linux:
+  target: AppImage
+# TODO: code signing — Windows EV cert + Apple Developer cert. Tracked
+#       as a follow-up; do NOT add cert paths or signing config here yet.

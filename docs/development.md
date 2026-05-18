@@ -11,6 +11,7 @@
 | npm | Ships with Node | Package manager |
 | OBS Studio | 28+ | Target WebSocket server (port 4455). WebSocket server is enabled by default in v28+. |
 | A Google account | n/a | For YouTube OAuth sign-in during development |
+| `libsecret` (Linux only) | system package | Required by Electron's `safeStorage` for encrypted tokens/settings. Install via `apt install libsecret-tools` (Debian/Ubuntu) or `dnf install libsecret-devel` (Fedora). Not needed on Windows or macOS. |
 
 **Windows is the primary target.** macOS works. Linux works if `libsecret`
 is installed (provides the `safeStorage` backend for `settings.enc` and
@@ -74,9 +75,10 @@ The window opens automatically. DevTools open in a detached window
 ## 5. Build
 
 ```bash
-npm run build          # renderer (Vite) + electron (tsc)
-npm run build:renderer # just the Vite bundle → dist/
-npm run build:electron # just the electron tsc → dist-electron/
+npm run build           # renderer (Vite) + electron (tsc)
+npm run build:renderer  # just the Vite bundle → dist/
+npm run build:electron  # just the electron tsc → dist-electron/
+npm run build:installer # build + run electron-builder → dist-builder/
 ```
 
 Two tsconfig files:
@@ -84,13 +86,26 @@ Two tsconfig files:
 - `tsconfig.electron.json` — main process + preload (Node libs, includes
   `electron/`, targets `dist-electron/`)
 
-No packaging step is wired up yet (no electron-builder or electron-forge
-config). To run a production build locally:
+To run a production build locally without packaging:
 
 ```bash
 npm run build
 npm start           # runs electron . which loads dist/index.html
 ```
+
+To produce a distributable installer, use `npm run build:installer`. This
+runs `npm run build` first, then invokes `electron-builder` driven by
+`electron-builder.yml` at the repo root. Output goes to `dist-builder/`:
+
+| Platform | Output |
+|---|---|
+| Windows | `dist-builder/Keshucord Setup <version>.exe` (NSIS) |
+| macOS   | `dist-builder/Keshucord-<version>.dmg` |
+| Linux   | `dist-builder/Keshucord-<version>.AppImage` |
+
+`electron-builder` builds for the host OS by default. Cross-compiling is
+possible but not wired up. Installers are currently **unsigned** — see
+[`known-issues.md`](./known-issues.md) §8 for the code-signing follow-up.
 
 ### Running tests
 
