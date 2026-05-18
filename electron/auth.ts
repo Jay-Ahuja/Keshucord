@@ -40,9 +40,72 @@ const TOKEN_REFRESH_LEEWAY_MS = 60_000;
 const REVOKE_TIMEOUT_MS = 5_000;
 const TOKENINFO_ENDPOINT = 'https://oauth2.googleapis.com/tokeninfo';
 const TOKENINFO_TIMEOUT_MS = 5_000;
+/**
+ * Hard ceiling for *every* outbound call to Google's OAuth + userinfo +
+ * YouTube channels endpoints. Without this, a hung TCP connection (think
+ * mid-flight Wi-Fi handover, captive portal, ISP DNS hijack, corporate
+ * proxy stalls) leaves the entire sign-in / refresh flow blocked
+ * indefinitely — and worse, leaves the user with no actionable error.
+ *
+ * 15s is long enough that healthy mobile / DSL connections complete a TLS
+ * handshake + POST + JSON response with comfortable headroom, and short
+ * enough that a stuck network surfaces as a clear timeout error rather
+ * than a perceived freeze.
+ *
+ * `probeTokenInfo` keeps its tighter 5s ceiling — it's purely diagnostic
+ * and shouldn't be allowed to slow down sign-in.
+ */
+const GOOGLE_FETCH_TIMEOUT_MS = 15_000;
 
 function log(...args: unknown[]) {
   console.info('[auth]', ...args);
+}
+
+/**
+ * HTML-escape arbitrary text before injecting it into the loopback callback
+ * page. Required because we render `error_description` (an attacker-controlled
+ * query-param string) straight into a `<p>` element — without escaping, a
+ * malicious redirect URL could deliver a stored-XSS payload to the loopback
+ * page (port-confined and short-lived, but still arbitrary script execution
+ * in the user's browser with file: privileges).
+ *
+ * Order matters: `&` MUST be replaced first, otherwise we'd double-escape
+ * the entities introduced by the later replacements (e.g. `&lt;` → `&amp;lt;`).
+ */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Wraps `fetch` with an `AbortController`-based timeout. On timeout the
+ * underlying request is aborted and we throw a clear, user-actionable error
+ * instead of the generic `AbortError`. All other fetch errors propagate
+ * unchanged so callers can distinguish "network failure" from "Google said no".
+ */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs: number = GOOGLE_FETCH_TIMEOUT_MS,
+): Promise<Response> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: ac.signal });
+  } catch (err) {
+    if (err instanceof Error && (err.name === 'AbortError' || ac.signal.aborted)) {
+      throw new Error(
+        `Google endpoint timed out after ${Math.round(timeoutMs / 1000)}s — check your network connection (${url}).`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -259,7 +322,25 @@ function startLoopback(expectedState: string): Promise<LoopbackHandle> {
   });
 }
 
-export async function signIn(): Promise<AuthUser> {
+// Single-flight guard for signIn(). Without this, a double-clicked "Sign In"
+// button starts two loopback servers + opens two browser tabs; the second
+// `startLoopback` would happily bind a *different* random port and the user
+// experiences a confusing race where only one tab can succeed. Coalescing
+// to the in-flight promise gives both callers the same eventual result.
+let signInInFlight: Promise<AuthUser> | null = null;
+
+export function signIn(): Promise<AuthUser> {
+  if (signInInFlight) {
+    log('signIn: returning in-flight promise (deduped concurrent sign-in)');
+    return signInInFlight;
+  }
+  signInInFlight = signInImpl().finally(() => {
+    signInInFlight = null;
+  });
+  return signInInFlight;
+}
+
+async function signInImpl(): Promise<AuthUser> {
   const { clientId, clientSecret } = config();
   const state = base64url(crypto.randomBytes(16));
   const pkce = pkcePair();
@@ -501,7 +582,7 @@ async function exchangeCode(args: {
   codeVerifier: string;
   redirectUri: string;
 }): Promise<GoogleTokenResponse> {
-  const res = await fetch(TOKEN_ENDPOINT, {
+  const res = await fetchWithTimeout(TOKEN_ENDPOINT, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -517,12 +598,22 @@ async function exchangeCode(args: {
     const text = await res.text();
     throw new Error(`Token exchange failed (${res.status}): ${text}`);
   }
-  return (await res.json()) as GoogleTokenResponse;
+  const tokens = (await res.json()) as GoogleTokenResponse;
+  // Google's token endpoint is documented to always return `token_type: "Bearer"`.
+  // If that ever changes (or we somehow hit a man-in-the-middle that rewrites
+  // the response) we want to fail loudly here rather than silently store a
+  // token that the rest of the app would still try to use as a Bearer token.
+  if (tokens.token_type !== 'Bearer') {
+    throw new Error(
+      `Unexpected token_type "${tokens.token_type}" from Google — expected "Bearer".`,
+    );
+  }
+  return tokens;
 }
 
 async function refresh(stored: tokenStore.StoredTokens): Promise<tokenStore.StoredTokens | null> {
   const { clientId, clientSecret } = config();
-  const res = await fetch(TOKEN_ENDPOINT, {
+  const res = await fetchWithTimeout(TOKEN_ENDPOINT, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -533,14 +624,73 @@ async function refresh(stored: tokenStore.StoredTokens): Promise<tokenStore.Stor
     }),
   });
   if (!res.ok) {
-    // Refresh token revoked or expired — clear local state so the user re-signs in.
-    log(`refresh: token endpoint returned ${res.status} — clearing local state`);
-    await tokenStore.clear();
-    return null;
+    // === Why we no longer blanket-clear on every !res.ok ============================
+    // The previous implementation unconditionally called tokenStore.clear() on any
+    // non-2xx response, which made a transient hiccup (502 from Google, a 429 burst,
+    // a corporate proxy returning 503, a 5xx during a Google incident, or a 4xx
+    // without an auth-class reason) look identical to a real "your refresh token is
+    // gone" event. The result: a user who was happily signed in would mysteriously
+    // get bounced to the login screen, lose their in-progress launch, and have to
+    // redo the whole consent flow — for nothing.
+    //
+    // The OAuth 2.0 RFC (6749 §5.2) lists the *auth-failure* error codes that
+    // truly mean "this refresh_token will never work again": `invalid_grant`,
+    // `invalid_token`, `invalid_request`. Everything else (network blip, server
+    // error, rate limit, malformed body we can't parse) is recoverable — we throw
+    // so the caller's retry logic / outer error boundary can react, and we leave
+    // the cached tokens intact so the next attempt has something to refresh.
+    //
+    // Audit reference: H3 ("silent sign-out on transient refresh failure").
+    // ================================================================================
+    let errorCode: string | undefined;
+    try {
+      // Cloning so subsequent .text() / debugging is still possible if needed.
+      const body = (await res.json()) as { error?: string; error_description?: string };
+      errorCode = typeof body?.error === 'string' ? body.error : undefined;
+    } catch {
+      // Malformed / non-JSON body from Google — extremely rare, but if it
+      // happens we deliberately fall through to the "non-auth-class" branch.
+      // It would be unsafe to assume "invalid_grant" without evidence.
+      errorCode = undefined;
+    }
+
+    const isAuthClass4xx =
+      res.status >= 400 &&
+      res.status < 500 &&
+      (errorCode === 'invalid_grant' ||
+        errorCode === 'invalid_token' ||
+        errorCode === 'invalid_request');
+
+    if (isAuthClass4xx) {
+      log(
+        `refresh: token endpoint returned ${res.status} ${errorCode} — clearing local state (genuine auth failure)`,
+      );
+      await tokenStore.clear();
+      return null;
+    }
+
+    log(
+      `refresh: token endpoint returned ${res.status}${
+        errorCode ? ` (error="${errorCode}")` : ''
+      } — treating as transient, preserving cached tokens`,
+    );
+    throw new Error(
+      `Google token endpoint returned ${res.status}${
+        errorCode ? ` (${errorCode})` : ''
+      } — refresh failed transiently. Cached tokens kept; retry later.`,
+    );
   }
   const data = (await res.json()) as Omit<GoogleTokenResponse, 'refresh_token'> & {
     refresh_token?: string;
   };
+  // Same defensive token_type assertion as exchangeCode — if Google's refresh
+  // response ever stops being a Bearer token, fail loudly instead of silently
+  // mis-using whatever we got back.
+  if (data.token_type !== undefined && data.token_type !== 'Bearer') {
+    throw new Error(
+      `Unexpected token_type "${data.token_type}" from Google — expected "Bearer".`,
+    );
+  }
   const nextScope = data.scope ?? stored.scope;
   // A refresh can never *add* a scope — Google issues a token with at most
   // the scopes the refresh_token was originally consented to. So if the
@@ -586,7 +736,7 @@ async function fetchUserProfile(accessToken: string): Promise<AuthUser> {
 }
 
 async function fetchJson<T>(url: string, accessToken: string): Promise<T> {
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     headers: { authorization: `Bearer ${accessToken}` },
   });
   if (!res.ok) {
@@ -678,8 +828,13 @@ async function bestEffortRevoke(token: string): Promise<void> {
       signal: ac.signal,
     });
   } catch (err) {
-    log(
-      'bestEffortRevoke: revoke failed (continuing anyway):',
+    // Promoted from log() → console.warn so the failure is visible in default
+    // log filters (we ship to support with INFO suppressed but WARN+ kept).
+    // The user-actionable URL is included because there's literally nothing
+    // else they can do to fully revoke if Google's revoke endpoint is down.
+    console.warn(
+      '[auth] revoke failed during sign-out — refresh token may still be valid on Google\'s servers. ' +
+        'The user can revoke at https://myaccount.google.com/permissions. Cause:',
       err instanceof Error ? err.message : err,
     );
   } finally {
@@ -690,8 +845,22 @@ async function bestEffortRevoke(token: string): Promise<void> {
 function callbackPage(kind: 'success' | 'error', message: string): string {
   const accent = kind === 'success' ? '#10b981' : '#ef4444';
   const title = kind === 'success' ? 'Signed in' : 'Sign-in failed';
+  // `message` originates from Google's `error_description` query param on the
+  // failure path — i.e. attacker-influenceable text. Escaping it before
+  // interpolation closes a reflected-XSS vector on the loopback origin (port-
+  // confined, but capable of arbitrary script execution in the user's browser
+  // and exfiltration of any same-origin state the page can read).
+  //
+  // The CSP `<meta>` tag is defence-in-depth: even if an escape ever regresses,
+  // `default-src 'none'` blocks all script execution (no inline, no remote, no
+  // eval), and `style-src 'unsafe-inline'` preserves only the inline style we
+  // use to render the card.
+  const safeTitle = escapeHtml(title);
+  const safeMessage = escapeHtml(message);
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>Keshucord</title>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>Keshucord</title>
 <style>
   html,body{margin:0;height:100%}
   body{display:grid;place-items:center;background:#08080c;color:#fff;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -702,5 +871,5 @@ function callbackPage(kind: 'success' | 'error', message: string): string {
   p{margin:0;color:rgba(255,255,255,.65);line-height:1.55;font-size:14px}
 </style></head>
 <body><div class="card"><span class="brand"><span class="dot"></span>Keshucord</span>
-<h1>${title}</h1><p>${message}</p></div></body></html>`;
+<h1>${safeTitle}</h1><p>${safeMessage}</p></div></body></html>`;
 }
