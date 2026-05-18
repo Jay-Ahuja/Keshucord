@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from 'react';
+import { useCallback, useId, useMemo, useState } from 'react';
 import {
   ArrowRightIcon,
   BoltIcon,
@@ -10,6 +10,8 @@ import {
   UploadIcon,
   WifiIcon,
 } from '../components/Icons';
+import { ObsLaunchDialog } from '../components/ObsLaunchDialog';
+import { probe as probeObs } from '../services/obsService';
 import type {
   OBSConnectionState,
   Privacy,
@@ -120,6 +122,15 @@ export default function CreateScreen({ user, value, onChange, onSubmit }: Props)
   const titleValid = value.title.trim().length > 0;
   const isStreaming = obsStatus.state === 'streaming';
 
+  // Pre-flight gating UI state. `obsDialogOpen` covers both the prompt and
+  // the in-flight launch — the Go Live button is disabled the whole time so
+  // the user can't trigger a parallel probe by double-clicking.
+  // `probing` covers the brief window between the click and either the
+  // dialog opening or onSubmit firing (probe() itself is fast — capped at
+  // 1.5s — but the click needs to feel inert while it's outstanding).
+  const [probing, setProbing] = useState(false);
+  const [obsDialogOpen, setObsDialogOpen] = useState(false);
+
   // Submit gating mirrors the validate step in runLaunchSequence — same rules,
   // earlier feedback.
   const blockReason: string | null = !titleValid
@@ -131,17 +142,71 @@ export default function CreateScreen({ user, value, onChange, onSubmit }: Props)
     : schedule === 'later'
     ? 'Scheduling lands in a follow-up — switch to “Start now” to launch.'
     : null;
-  const canSubmit = blockReason === null;
+  // Local-validation gate. We track this separately from `canSubmit` so the
+  // button reflects both "form is valid" AND "no preflight in flight".
+  const formValid = blockReason === null;
+  const canSubmit = formValid && !probing && !obsDialogOpen;
 
-  const handleSubmit = () => {
-    if (!canSubmit) return;
+  /**
+   * Trim + freeze the form values once we know the launch is going through.
+   * Reused by both the direct-onSubmit path (OBS already running) and the
+   * post-dialog path (user launched OBS and we proceed).
+   */
+  const fireSubmit = useCallback(() => {
     onSubmit({
       ...value,
       title: value.title.trim(),
       description: value.description.trim(),
       category: value.category.trim(),
     });
-  };
+  }, [onSubmit, value]);
+
+  /**
+   * Go Live click handler with the OBS pre-flight gate.
+   *
+   * Order of operations (must not change):
+   *   1. local form validation — bail out silently if `!formValid` (button
+   *      is already disabled in this case, but defending against keyboard
+   *      shortcut callers).
+   *   2. `probe()` — fast raw-WebSocket check. NO state mutation in
+   *      `obsService` — see the comment block above `probe()`.
+   *   3. if reachable: hand off to `onSubmit` (App.tsx routes to launch).
+   *      if NOT reachable: open the launch-OBS dialog. The dialog drives
+   *      `launchAndWait()` and calls back into `handleObsLaunched` on
+   *      success.
+   *
+   * Defensive: if `probe()` itself throws (shouldn't — it catches
+   * everything internally), we log and open the dialog rather than
+   * silently dropping the click. Better to ask the user than to leave
+   * them tapping a dead button.
+   */
+  const handleSubmit = useCallback(async () => {
+    if (!formValid || probing || obsDialogOpen) return;
+    setProbing(true);
+    let reachable = false;
+    try {
+      reachable = await probeObs();
+    } catch (err) {
+      console.warn('[obs] preflight probe threw unexpectedly:', err);
+      reachable = false;
+    } finally {
+      setProbing(false);
+    }
+    if (reachable) {
+      fireSubmit();
+    } else {
+      setObsDialogOpen(true);
+    }
+  }, [formValid, probing, obsDialogOpen, fireSubmit]);
+
+  const handleObsLaunched = useCallback(() => {
+    setObsDialogOpen(false);
+    fireSubmit();
+  }, [fireSubmit]);
+
+  const handleObsDialogClose = useCallback(() => {
+    setObsDialogOpen(false);
+  }, []);
 
   const preflightOBS = obsPreflight(obsStatus.state);
 
@@ -166,9 +231,16 @@ export default function CreateScreen({ user, value, onChange, onSubmit }: Props)
           <button
             type="button"
             className="btn primary"
-            onClick={handleSubmit}
+            onClick={() => void handleSubmit()}
             disabled={!canSubmit}
-            title={blockReason ?? 'Create the broadcast and start streaming'}
+            title={
+              blockReason ??
+              (probing
+                ? 'Checking OBS…'
+                : obsDialogOpen
+                ? 'Finish the OBS launch dialog to continue.'
+                : 'Create the broadcast and start streaming')
+            }
           >
             Go Live <ArrowRightIcon className="h-3.5 w-3.5" />
           </button>
@@ -543,12 +615,20 @@ export default function CreateScreen({ user, value, onChange, onSubmit }: Props)
           <button
             type="button"
             className="btn primary lg"
-            onClick={handleSubmit}
+            onClick={() => void handleSubmit()}
             disabled={!canSubmit}
-            title={blockReason ?? 'Create the broadcast and start streaming'}
+            title={
+              blockReason ??
+              (probing
+                ? 'Checking OBS…'
+                : obsDialogOpen
+                ? 'Finish the OBS launch dialog to continue.'
+                : 'Create the broadcast and start streaming')
+            }
             style={{ justifyContent: 'center', width: '100%' }}
           >
-            <LiveIcon className="h-4 w-4" /> Go Live
+            <LiveIcon className="h-4 w-4" />{' '}
+            {probing ? 'Checking OBS…' : 'Go Live'}
             <span style={{ marginLeft: 'auto', opacity: 0.7 }}>⌘↵</span>
           </button>
 
@@ -567,6 +647,19 @@ export default function CreateScreen({ user, value, onChange, onSubmit }: Props)
           )}
         </div>
       </div>
+
+      {/*
+        OBS pre-flight launch dialog. Mounted from this screen (not App.tsx)
+        so its lifecycle is tied to CreateScreen — navigating away (e.g. user
+        opens Settings during the prompt) cleanly unmounts it. The dialog
+        owns its own 'prompt' / 'launching' / 'error' state machine; we only
+        provide the open flag and the success/dismiss callbacks.
+      */}
+      <ObsLaunchDialog
+        open={obsDialogOpen}
+        onClose={handleObsDialogClose}
+        onLaunched={handleObsLaunched}
+      />
     </div>
   );
 }
