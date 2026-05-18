@@ -6,7 +6,31 @@
       "Bash(Sort-Object FullName)",
       "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\jahuj\\\\Dropbox\\\\Keshucord\" -Recurse | Where-Object { $_.PSIsContainer } | Select-Object FullName)",
       "Bash(npx tsc *)",
-      "Bash(npx vite *)"
+      "Bash(npx vite *)",
+      "Write",
+      "Edit",
+      "Bash(npm run build)",
+      "Bash(npm run build:electron)",
+      "Bash(npm run build:renderer)",
+      "Bash(git status)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "PowerShell(npm run build)",
+      "PowerShell(npm run build:electron)",
+      "PowerShell(npm run build:renderer)",
+      "PowerShell(git status)",
+      "PowerShell(git status:*)",
+      "PowerShell(git diff:*)",
+      "PowerShell(git log:*)",
+      "PowerShell(git branch:*)",
+      "PowerShell(git checkout:*)",
+      "PowerShell(git add:*)",
+      "PowerShell(git commit:*)"
     ]
   }
 }
