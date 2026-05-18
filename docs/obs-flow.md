@@ -198,9 +198,40 @@ stopStreaming()                          ◄── called by:
    └─ return new status
 ```
 
-There is no programmatic launch of the OBS process. `obsService.launchObs()`
-exists but is a 200 ms `sleep` stub — the launch flow does not call it.
-If OBS isn't running, the `connect-obs` step fails with a clear error.
+### Pre-flight: `probe()` and `launchAndWait()`
+
+The renderer-side OBS pre-flight is two distinct helpers, both in
+`obsService.ts`. Neither is part of the 10-step launch orchestrator —
+they run BEFORE `runLaunchSequence` is invoked (from CreateScreen's Go
+Live handler and `ObsLaunchDialog`).
+
+- **`probe({ timeoutMs })`** — a side-effect-free reachability check.
+  Opens a raw `new WebSocket('ws://localhost:4455')`, watches for
+  `open` (→ resolve `true`) vs `error`/`close` (→ resolve `false`)
+  with a 1.5 s default timeout, then closes the socket. Crucially it
+  does NOT touch the shared `obs` instance, mutate `status`, or notify
+  any subscribers — so calling it on every Go Live click never emits
+  phantom `connecting`/`error` pulses to `useObsStatus` consumers (the
+  CreateScreen pre-flight row, the Sidebar OBS chip, the Dashboard).
+
+- **`launchAndWait({ timeoutMs })`** — the actual launch helper. It
+  invokes the `obs:launch` IPC (which hands off to
+  `electron/obsProcess.ts::launchObs`), then polls `probe()` every
+  750 ms until either OBS becomes reachable or the 30 s default
+  deadline elapses. On spawn failure or timeout it throws
+  `ObsLaunchError` with a `reason` string the dialog can render
+  verbatim. It does NOT call `connect()` — opening the authenticated
+  WebSocket is the launch orchestrator's job once the user actually
+  clicks Go Live again.
+
+The pre-flight gate happens BEFORE `runLaunchSequence` is invoked. If
+the gate decides OBS needs to be launched, `ObsLaunchDialog` calls
+`launchAndWait()`; once it resolves, the original Go Live action
+proceeds and the 10-step orchestrator runs unchanged.
+
+If the user dismisses the dialog, the 10-step orchestrator still
+guards itself — `connect-obs` (step 7) fails with a clear "Could not
+reach OBS at ws://localhost:4455" error.
 
 ## 6. Health metrics
 

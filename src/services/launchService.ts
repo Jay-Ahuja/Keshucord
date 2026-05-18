@@ -324,27 +324,43 @@ async function _runLaunchSequence({
     //    leaving OBS pushing to a tombstoned endpoint is strictly worse than
     //    a graceful stop (the user gets a frozen-LIVE chip and a failed RTMP
     //    output instead).
+    // Each cleanup OBS call is bounded by a 5s timeout. The catch block runs
+    // on the user's "I just clicked Cancel" path too — if OBS itself is wedged
+    // (the WebSocket accepted the request but the OBS event loop is frozen,
+    // which we've seen during long encode-init stalls), an un-timed-out
+    // `await obs.stopStreaming()` / `await obs.disconnect()` would hang the
+    // whole orchestrator forever and the LaunchStatusScreen would sit on
+    // "Cleaning up…" with no way out. The 5s budget is generous enough that
+    // a healthy OBS always finishes inside it, and short enough that a
+    // frozen OBS doesn't pin the user.
+    const CLEANUP_TIMEOUT_MS = 5000;
     if (obsProgress === 'streaming') {
       if (obs.getStatus().state === 'streaming') {
         log('launch-cleanup: OBS is streaming after a failed launch — stopping it before deleting broadcast');
-        try {
-          await obs.stopStreaming();
-        } catch (stopErr) {
+        await Promise.race<unknown>([
+          obs.stopStreaming(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('stopStreaming timed out')), CLEANUP_TIMEOUT_MS),
+          ),
+        ]).catch((stopErr) =>
           console.warn(
             '[launch] failed to stop OBS streaming during cleanup:',
             stopErr instanceof Error ? stopErr.message : stopErr,
-          );
-        }
+          ),
+        );
       }
     } else if (obsProgress === 'connected' || obsProgress === 'configured') {
       const obsState = obs.getStatus().state;
       if (obsState === 'connected' || obsState === 'connecting') {
         log(`launch-cleanup: forcing OBS disconnect (obsProgress="${obsProgress}", obsState="${obsState}")`);
-        try {
-          await obs.disconnect();
-        } catch (disconnectErr) {
-          console.warn('[launch] failed to disconnect OBS during cleanup:', disconnectErr);
-        }
+        await Promise.race<unknown>([
+          obs.disconnect(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('disconnect timed out')), CLEANUP_TIMEOUT_MS),
+          ),
+        ]).catch((disconnectErr) =>
+          console.warn('[launch] failed to disconnect OBS during cleanup:', disconnectErr),
+        );
       }
     }
 

@@ -50,12 +50,23 @@ export function ObsLaunchDialog({ open, onClose, onLaunched }: Props) {
       // dialog dismissal and screen change).
       onLaunched();
     } catch (err) {
-      const reason =
+      const raw =
         err instanceof ObsLaunchError
           ? err.reason
           : err instanceof Error
           ? err.message
           : 'Could not launch OBS.';
+      // Two distinct failure shapes show up here:
+      //   - "OBS Studio is not installed at the expected location" /
+      //     "OBS Studio is not on your PATH" → user needs to install OBS or
+      //     point the launcher at it. No follow-up fiddling helps.
+      //   - everything else → the spawn worked but OBS didn't open its
+      //     WebSocket on 4455 within the deadline. Most often the user has
+      //     OBS open but the WebSocket server is disabled.
+      const lowered = raw.toLowerCase();
+      const reason = lowered.includes('not installed') || lowered.includes('not on your path')
+        ? raw
+        : `${raw} If OBS is open, check Tools → WebSocket Server Settings has the server enabled on port 4455.`;
       setState({ kind: 'error', reason });
     }
   }, [onLaunched]);

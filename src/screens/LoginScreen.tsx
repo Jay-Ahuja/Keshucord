@@ -15,6 +15,30 @@ const TRUST_ITEMS = [
   'No telemetry by default',
 ];
 
+/**
+ * Translate raw Google/OAuth error strings into friendly, actionable copy.
+ * Falls through to a generic "try again" message so users never see
+ * `invalid_grant` / `redirect_uri_mismatch` / etc. in the UI verbatim.
+ */
+function mapGoogleError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err ?? '');
+  console.warn('[login] sign-in failed:', raw);
+  const lowered = raw.toLowerCase();
+  if (lowered.includes('invalid_grant')) {
+    return 'Your previous sign-in has expired. Try signing in again.';
+  }
+  if (lowered.includes('access_denied')) {
+    return 'Sign-in was declined.';
+  }
+  if (lowered.includes('redirect_uri_mismatch')) {
+    return 'OAuth client misconfigured — check docs/oauth-setup.md.';
+  }
+  if (lowered.includes('timed out') || lowered.includes('timeout')) {
+    return raw;
+  }
+  return 'Sign-in failed. Please try again.';
+}
+
 export default function LoginScreen({ onSignedIn }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -27,7 +51,7 @@ export default function LoginScreen({ onSignedIn }: Props) {
       onSignedIn(user);
       return; // parent advances the screen
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Sign-in failed.');
+      setError(mapGoogleError(err));
       setBusy(false);
     }
   };

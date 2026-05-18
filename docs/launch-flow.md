@@ -498,7 +498,10 @@ because it's a renderer-side polling loop we wrote.
 ## 8. Cleanup flow
 
 Triggered by **any** throw inside the orchestrator (including the abort).
-Implemented as the outer try/catch in `_runLaunchSequence`:
+Implemented as the outer try/catch in `_runLaunchSequence`. Cleanup has
+two phases: **YouTube resource deletion** and **OBS state hygiene**.
+
+### YouTube resource deletion
 
 ```ts
 } catch (err) {
@@ -531,26 +534,79 @@ Implemented as the outer try/catch in `_runLaunchSequence`:
     }
   }
 
-  throw err;                                   // original error wins
+  // … OBS state hygiene runs here, then `throw err` …
 }
 ```
 
-Cleanup invariants:
+### OBS state hygiene
 
-- **Best-effort**: a cleanup failure logs `console.warn` and is swallowed
-  — the user sees the original error, not the cleanup error.
-- **Parallel**: `Promise.allSettled` so a hanging delete doesn't block
-  the other.
-- **Order-independent**: deleting the stream first vs broadcast first
-  doesn't matter to YouTube — `bind` is automatically severed when
-  either side is deleted.
-- **No "I already started OBS streaming" cleanup**: if step 9
-  (`start-stream`) succeeded but step 10 (`go-live`) fails, OBS is
-  still pushing RTMP. We do NOT call `obs.stopStreaming()` in the
-  cleanup branch. The user has to manually End Stream from DashScreen
-  or stop OBS from inside OBS. This is intentional — auto-stopping a
-  live broadcast on a flaky `go-live` step would be the wrong default
-  if the stream is actually live but YouTube just lagged.
+The orchestrator tracks how far it got on the OBS side via a local
+`obsProgress` variable that transitions through four states:
+
+```
+'none' → 'connected' → 'configured' → 'streaming'
+```
+
+- `'none'`         — step 7 (`connect-obs`) hasn't run or threw before completing.
+- `'connected'`    — `obs.connect()` succeeded; we hold a live WebSocket.
+- `'configured'`   — `obs.configureStreamService()` succeeded; OBS is pointed at our RTMP URL + key.
+- `'streaming'`    — `obs.startStreaming()` succeeded; OBS is actively pushing RTMP.
+
+In the catch block, after the YouTube deletion phase, we branch on
+`obsProgress`:
+
+| `obsProgress` at failure | Cleanup action | Rationale |
+|---|---|---|
+| `'streaming'` (and `obs.getStatus().state === 'streaming'`) | `await obs.stopStreaming()` with a 5 s `Promise.race` timeout | OBS is pushing RTMP at a broadcast we just deleted in the previous phase. Leaving it running pushes video into a tombstoned endpoint — the user gets a frozen LIVE chip and a failed RTMP output. A graceful stop is strictly better. |
+| `'connected'` or `'configured'` (and OBS state is `connected`/`connecting`) | `await obs.disconnect()` with a 5 s `Promise.race` timeout | We may have written a `rtmp_custom` service pointing at the deleted broadcast. Dropping the connection guarantees the next launch's `connect-obs` step starts from a clean slate instead of inheriting a stale WebSocket or stale service config. |
+| `'none'` | nothing | We never touched OBS — nothing to undo. |
+
+Why the 5 s timeout: the catch block also runs on the user's "I clicked
+Cancel" path. If OBS itself is wedged (the WebSocket accepted the request
+but the OBS event loop is frozen — observed during long encode-init
+stalls), an unbounded `await` would hang the orchestrator forever and
+`LaunchStatusScreen` would sit on "Cleaning up…" with no exit. 5 s is
+generous enough that a healthy OBS always finishes inside it, and short
+enough that a frozen OBS doesn't pin the user.
+
+```ts
+await Promise.race<unknown>([
+  obs.stopStreaming(),
+  new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('stopStreaming timed out')), 5000),
+  ),
+]).catch((stopErr) => console.warn('[launch] cleanup stopStreaming:', stopErr));
+```
+
+The `.catch` makes the cleanup branch best-effort — a failed stop or
+disconnect doesn't mask the original launch error.
+
+### Cleanup invariants
+
+- **Best-effort**: every individual cleanup step (delete broadcast,
+  delete stream, stop streaming, disconnect) logs `console.warn` on
+  failure and is swallowed. The user always sees the original launch
+  error, not the cleanup error.
+- **Parallel YouTube deletion**: `Promise.allSettled` so a hanging
+  broadcast delete doesn't block the stream delete or vice versa.
+- **Order-independent YouTube deletion**: deleting the stream first vs
+  broadcast first doesn't matter to YouTube — `bind` is automatically
+  severed when either side is deleted.
+- **Bounded OBS calls**: both `stopStreaming()` and `disconnect()` are
+  wrapped in `Promise.race` against a 5 s timeout. The orchestrator
+  cannot hang indefinitely waiting for a frozen OBS.
+- **No catch-block cleanup of `'streaming'` if OBS already left that
+  state**: we re-check `obs.getStatus().state === 'streaming'` before
+  calling `stopStreaming()`. If OBS stopped on its own between the
+  failure and the catch block, we don't issue a redundant Stop.
+
+The previous documented invariant ("never auto-stop a live broadcast on
+a flaky `go-live` step") was rewritten in this version. Its reasoning
+assumed the broadcast might still be salvageable, but the cleanup
+branch deletes the broadcast unconditionally — so leaving OBS pushing
+to a deleted endpoint was strictly worse than a graceful stop. The
+current code stops OBS streaming if and only if we're in the catch
+branch with `obsProgress === 'streaming'`.
 
 ## 9. Failure handling per step
 
