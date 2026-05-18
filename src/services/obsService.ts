@@ -742,11 +742,168 @@ export async function testConnection(password: string): Promise<TestResult> {
   }
 }
 
-// Launching OBS as a process needs the Electron main process (shell exec).
-// Stubbed for now — the launch flow assumes OBS is already running and reuses
-// whatever instance owns ws://localhost:4455.
-export async function launchObs(): Promise<void> {
-  await sleep(200);
+// ---- Pre-flight probe + launch-and-wait ----
+//
+// These two helpers power the renderer-side OBS pre-flight gate that runs
+// BEFORE `runLaunchSequence` is invoked (see CreateScreen's Go Live handler
+// and ObsLaunchDialog). They are deliberately separate from `connect()`:
+//
+//  - `connect()` performs the OBS WebSocket Identify handshake, requires
+//    the password, and mutates module-level `status` + drives subscribers.
+//    Running it from the pre-flight would emit phantom 'connecting' /
+//    'error' status pulses to every `useObsStatus` consumer just to answer
+//    the question "is OBS open?".
+//
+//  - `probe()` does a raw WebSocket open() to ws://localhost:4455 with no
+//    Identify, no password, no module-state mutation. It only answers the
+//    reachability question. We open the socket, observe whether `open` or
+//    `error` fires first (with a small timeout) and close immediately.
+//
+//  - `launchAndWait()` issues the spawn IPC and then polls `probe()` on a
+//    fixed cadence until either the probe succeeds or we hit the deadline.
+
+const PROBE_DEFAULT_TIMEOUT_MS = 1_500;
+const LAUNCH_DEFAULT_TIMEOUT_MS = 30_000;
+const LAUNCH_POLL_INTERVAL_MS = 750;
+
+export class ObsLaunchError extends Error {
+  /** User-displayable reason — safe to render directly in the dialog. */
+  readonly reason: string;
+  /** Discriminator for callers that want to switch on the failure mode. */
+  readonly kind: 'spawn-failed' | 'timeout';
+
+  constructor(kind: 'spawn-failed' | 'timeout', reason: string) {
+    super(reason);
+    this.name = 'ObsLaunchError';
+    this.kind = kind;
+    this.reason = reason;
+  }
+}
+
+/**
+ * One-shot reachability probe for the OBS WebSocket port. Resolves `true`
+ * if the TCP/WebSocket upgrade completes within `timeoutMs`, `false`
+ * otherwise.
+ *
+ * IMPORTANT: this MUST remain side-effect-free. It does not touch the
+ * shared `obs` instance, does not mutate `status`, does not notify any
+ * subscribers, and does not log connection lifecycle events at the same
+ * volume as `connect()`. Pre-flight runs on every Go Live click — phantom
+ * events here would be visible in `useObsStatus` consumers (the
+ * CreateScreen pre-flight row, the Sidebar OBS chip, the dashboard).
+ *
+ * @returns `true` when the WebSocket open() succeeds before the timeout,
+ *          `false` on connection refused, network error, or timeout.
+ */
+export async function probe({
+  timeoutMs = PROBE_DEFAULT_TIMEOUT_MS,
+}: { timeoutMs?: number } = {}): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let ws: WebSocket | null = null;
+    let settled = false;
+
+    const settle = (reachable: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      // Best-effort close. If the socket never opened (`error` path), close
+      // is a no-op; if it did open, this releases the kernel-side handle
+      // before OBS notices anything observable about us.
+      try {
+        ws?.close();
+      } catch {
+        // ignore
+      }
+      resolve(reachable);
+    };
+
+    let timer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      log(`probe: timeout after ${timeoutMs}ms`);
+      settle(false);
+    }, timeoutMs);
+
+    try {
+      ws = new WebSocket(OBS_URL);
+    } catch (err) {
+      // Constructing the WebSocket can throw synchronously on invalid URL
+      // — shouldn't happen with our constant, but guard anyway.
+      log('probe: WebSocket construction threw:', err);
+      settle(false);
+      return;
+    }
+
+    ws.addEventListener('open', () => {
+      log('probe: reachable');
+      settle(true);
+    });
+    ws.addEventListener('error', () => {
+      // Browsers/Node don't expose useful error detail here for security
+      // reasons — we only need the binary answer "is the port open?".
+      log('probe: not reachable');
+      settle(false);
+    });
+    ws.addEventListener('close', () => {
+      // If we get a close without an open, treat it as unreachable. After
+      // a successful open the explicit ws.close() in settle() will fire
+      // this too — settled-guard prevents double resolution.
+      settle(false);
+    });
+  });
+}
+
+/**
+ * Asks the main process to spawn OBS, then polls `probe()` every
+ * `LAUNCH_POLL_INTERVAL_MS` until either OBS becomes reachable or
+ * `timeoutMs` elapses.
+ *
+ * Does NOT call `connect()` — that's the launch orchestrator's job once
+ * the user actually clicks Go Live again. This function only guarantees
+ * that the WebSocket port is accepting connections.
+ *
+ * @throws {ObsLaunchError} with `kind='spawn-failed'` when the main-process
+ *   launch call returns `{ok: false, reason}`. The `reason` is preserved
+ *   verbatim for the UI.
+ * @throws {ObsLaunchError} with `kind='timeout'` when OBS doesn't become
+ *   reachable within `timeoutMs` of spawn.
+ */
+export async function launchAndWait({
+  timeoutMs = LAUNCH_DEFAULT_TIMEOUT_MS,
+}: { timeoutMs?: number } = {}): Promise<void> {
+  log(`launchAndWait: requesting OBS spawn (timeout=${timeoutMs}ms)`);
+  const result = await window.keshucord.obs.launch();
+  if (!result.ok) {
+    log(`launchAndWait: spawn rejected — ${result.reason}`);
+    throw new ObsLaunchError('spawn-failed', result.reason);
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let attempt = 0;
+  // First poll fires after the initial interval — OBS needs at least a
+  // moment to bind 4455 after spawn, and polling at t=0 just wastes a
+  // probe on a socket that hasn't been opened yet.
+  while (Date.now() < deadline) {
+    await sleep(LAUNCH_POLL_INTERVAL_MS);
+    attempt += 1;
+    // Cap each probe to whatever's left of the overall deadline so a slow
+    // failing socket can't push us past the budget.
+    const remaining = Math.max(50, deadline - Date.now());
+    const probeTimeout = Math.min(PROBE_DEFAULT_TIMEOUT_MS, remaining);
+    const reachable = await probe({ timeoutMs: probeTimeout });
+    if (reachable) {
+      log(`launchAndWait: OBS reachable after ${attempt} probe(s)`);
+      return;
+    }
+  }
+
+  log(`launchAndWait: timed out after ${timeoutMs}ms (${attempt} probes)`);
+  throw new ObsLaunchError(
+    'timeout',
+    `OBS didn't become reachable on ws://localhost:4455 within ${Math.round(timeoutMs / 1000)}s. ` +
+      'Open OBS manually and make sure Tools → WebSocket Server Settings has the server enabled on port 4455.',
+  );
 }
 
 // ---- internals ----
