@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import * as auth from './auth';
+import * as obsProcess from './obsProcess';
 import * as settingsStore from './settingsStore';
 import * as youtube from './youtube';
 
@@ -47,4 +48,10 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('youtube:cancel', () => {
     youtube.cancelAllInFlight();
   });
+
+  // OBS process (pre-flight): detect a running OBS Studio and, if needed,
+  // launch it from disk. Distinct from the OBS WebSocket calls in the
+  // renderer's obsService — this layer only deals with the OS process.
+  ipcMain.handle('obs:is-running', () => obsProcess.isObsRunning());
+  ipcMain.handle('obs:launch', () => obsProcess.launchObs());
 }
