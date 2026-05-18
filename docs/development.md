@@ -92,6 +92,18 @@ npm run build
 npm start           # runs electron . which loads dist/index.html
 ```
 
+### Running tests
+
+```bash
+npm run test            # one-shot Vitest run (used in CI)
+npm run test:watch      # interactive watch mode
+npm run test:coverage   # one-shot run + v8 coverage report (text + html)
+```
+
+Vitest reads `tsconfig.json` directly and runs under jsdom. See
+[`docs/testing.md`](./testing.md) for the current test inventory and
+recommended targets for new suites.
+
 ## 6. Project structure (quick map)
 
 ```
