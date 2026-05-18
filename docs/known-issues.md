@@ -10,15 +10,6 @@
 
 ## 1. Dead code
 
-### `src/utils/delay.ts` — unused module [debt]
-
-```
-File: src/utils/delay.ts
-```
-
-Exports a `delay(ms)` promise helper. Was used during mock-API development.
-No current code imports it. Safe to delete.
-
 ### `YouTubeUser.avatarColor` — produced but never consumed [debt]
 
 ```
@@ -30,12 +21,6 @@ Code:  src/services/youtubeService.ts → decorate()
 attaches it as `avatarColor`. The only historical consumer (`UserChip`
 component) was deleted. The Sidebar's avatar uses a CSS `.avatar` gradient
 directly. This field can be removed from the type and the `decorate()` call.
-
-### `tailwind.config.js` brand/ink palette — dead tokens [debt]
-
-All consumers migrated to oklch tokens in `keshucord.css`. Tailwind purges
-unused classes, so there is no bundle impact, but the config block
-misleads future readers.
 
 ## 2. Appearance settings — persisted but not applied
 

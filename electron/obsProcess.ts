@@ -70,7 +70,7 @@ export async function launchObs(): Promise<LaunchResult> {
     if (platform === 'darwin') {
       return launchMac();
     }
-    return launchLinux();
+    return await launchLinux();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`${LOG_PREFIX} unexpected launch error:`, message);
@@ -185,22 +185,54 @@ function launchMac(): LaunchResult {
   }
 }
 
-function launchLinux(): LaunchResult {
+function launchLinux(): Promise<LaunchResult> {
   // Assume `obs` is on PATH — the standard for distro packages and Flatpak
   // wrapper scripts. No cwd requirement on Linux.
+  //
+  // spawn() returns synchronously, but the 'error' event (ENOENT for a
+  // missing binary, EACCES, etc.) fires asynchronously on the next tick.
+  // We therefore wait a brief moment after spawn before resolving { ok: true }
+  // so a missing-binary error has time to propagate up as { ok: false } with
+  // an actionable message — instead of the previous behavior of returning
+  // success synchronously while the error fired into the void.
   console.log(`${LOG_PREFIX} launching via PATH: obs`);
-  try {
-    const child = spawn('obs', [], { detached: true, stdio: 'ignore' });
-    child.on('error', (err) => {
+  return new Promise<LaunchResult>((resolve) => {
+    let settled = false;
+    const settle = (result: LaunchResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    let child;
+    try {
+      child = spawn('obs', [], { detached: true, stdio: 'ignore' });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`${LOG_PREFIX} spawning 'obs' threw:`, message);
+      settle({ ok: false, reason: `Failed to launch OBS: ${message}` });
+      return;
+    }
+
+    child.on('error', (err: NodeJS.ErrnoException) => {
       console.error(`${LOG_PREFIX} spawning 'obs' emitted error:`, err.message);
+      if (err.code === 'ENOENT') {
+        settle({
+          ok: false,
+          reason:
+            'OBS Studio is not on your PATH — install via your distro package manager or set up a PATH entry.',
+        });
+        return;
+      }
+      settle({ ok: false, reason: `Failed to launch OBS: ${err.message}` });
     });
+
     child.unref();
-    return { ok: true };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`${LOG_PREFIX} spawning 'obs' threw:`, message);
-    return { ok: false, reason: `Failed to launch OBS: ${message}` };
-  }
+
+    // Give the 'error' event a chance to fire before we declare success.
+    // 200ms is plenty for libuv to drain a spawn-time failure.
+    setTimeout(() => settle({ ok: true }), 200);
+  });
 }
 
 /**

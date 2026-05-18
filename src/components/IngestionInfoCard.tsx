@@ -89,68 +89,99 @@ function IngestionRow({ label, children }: { label: string; children: React.Reac
   );
 }
 
+const COPY_FAIL_STYLE: React.CSSProperties = {
+  fontSize: 10.5,
+  color: 'oklch(0.86 0.14 22)',
+  marginTop: 4,
+  lineHeight: 1.4,
+};
+
 function CopyableValue({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(value);
+      setFailed(false);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('[ingestion] clipboard copy failed:', err);
+      setCopied(false);
+      setFailed(true);
+      window.setTimeout(() => setFailed(false), 2500);
     }
   };
   return (
-    <div className="row" style={{ gap: 8 }}>
-      <span
-        className="mono flex1"
-        style={{
-          fontSize: 11.5,
-          color: 'var(--fg-mute)',
-          wordBreak: 'break-all',
-          minWidth: 0,
-        }}
-      >
-        {value}
-      </span>
-      <button type="button" className="btn sm" onClick={copy}>
-        {copied ? 'Copied' : 'Copy'}
-      </button>
-    </div>
+    <>
+      <div className="row" style={{ gap: 8 }}>
+        <span
+          className="mono flex1"
+          style={{
+            fontSize: 11.5,
+            color: 'var(--fg-mute)',
+            wordBreak: 'break-all',
+            minWidth: 0,
+          }}
+        >
+          {value}
+        </span>
+        <button type="button" className="btn sm" onClick={copy}>
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      {failed && (
+        <div role="alert" style={COPY_FAIL_STYLE}>
+          Copy failed — clipboard permission denied or unavailable.
+        </div>
+      )}
+    </>
   );
 }
 
 function SecretValue({ value }: { value: string }) {
   const [shown, setShown] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(value);
+      setFailed(false);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('[ingestion] clipboard copy failed:', err);
+      setCopied(false);
+      setFailed(true);
+      window.setTimeout(() => setFailed(false), 2500);
     }
   };
   return (
-    <div className="row" style={{ gap: 8 }}>
-      <span
-        className="mono flex1"
-        style={{
-          fontSize: 11.5,
-          color: 'var(--fg-mute)',
-          wordBreak: 'break-all',
-          minWidth: 0,
-        }}
-      >
-        {shown ? value : '•'.repeat(Math.min(value.length, 28))}
-      </span>
-      <button type="button" className="btn sm ghost" onClick={() => setShown((s) => !s)}>
-        {shown ? 'Hide' : 'Show'}
-      </button>
-      <button type="button" className="btn sm" onClick={copy}>
-        {copied ? 'Copied' : 'Copy'}
-      </button>
-    </div>
+    <>
+      <div className="row" style={{ gap: 8 }}>
+        <span
+          className="mono flex1"
+          style={{
+            fontSize: 11.5,
+            color: 'var(--fg-mute)',
+            wordBreak: 'break-all',
+            minWidth: 0,
+          }}
+        >
+          {shown ? value : '•'.repeat(Math.min(value.length, 28))}
+        </span>
+        <button type="button" className="btn sm ghost" onClick={() => setShown((s) => !s)}>
+          {shown ? 'Hide' : 'Show'}
+        </button>
+        <button type="button" className="btn sm" onClick={copy}>
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      {failed && (
+        <div role="alert" style={COPY_FAIL_STYLE}>
+          Copy failed — clipboard permission denied or unavailable.
+        </div>
+      )}
+    </>
   );
 }

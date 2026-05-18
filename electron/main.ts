@@ -25,6 +25,22 @@ function createWindow() {
   win.once('ready-to-show', () => win.show());
 
   win.webContents.setWindowOpenHandler(({ url }) => {
+    // Restrict shell.openExternal to safe URL schemes. Allowing arbitrary
+    // schemes (file:, javascript:, custom OS handlers, etc.) would let any
+    // renderer-side string become a local command-execution vector via the
+    // OS's protocol registration.
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      console.warn('[main] blocked window.open for malformed URL:', url);
+      return { action: 'deny' };
+    }
+    const ALLOWED_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
+    if (!ALLOWED_PROTOCOLS.has(parsed.protocol)) {
+      console.warn('[main] blocked window.open for non-http(s) scheme:', url);
+      return { action: 'deny' };
+    }
     shell.openExternal(url);
     return { action: 'deny' };
   });

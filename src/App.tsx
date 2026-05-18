@@ -208,6 +208,13 @@ export default function App() {
       return (
         <LoginScreen
           onSignedIn={(signedIn) => {
+            // Reset the "seeded from user defaults" latch BEFORE updating the
+            // user so the seeding effect on lines 73-77 re-fires for the new
+            // account's stored defaults. Without this, the previous account's
+            // form values (title/description/privacy/category) would leak
+            // into the new user's CreateScreen — a cross-account data leak
+            // that's both confusing and a privacy footgun.
+            setSeededFromUserDefaults(false);
             setUser(signedIn);
             setScreen('create');
           }}
