@@ -109,9 +109,15 @@ export async function deleteLiveStream(streamId: string): Promise<void> {
 export async function cancel(): Promise<void> {
   try {
     await window.keshucord.youtube.cancel();
-  } catch {
-    // Cancel is best-effort — if the IPC itself fails, the in-flight fetches
-    // will still time out via the per-attempt timeout in electron/youtube.ts.
+  } catch (err) {
+    // Cancel is best-effort at the orchestration level — if the IPC itself
+    // fails, the in-flight fetches will still time out via the per-attempt
+    // timeout in electron/youtube.ts. But we surface a warn here so a
+    // genuinely broken cancel path isn't silently swallowed by the `void`
+    // cast in launchService (where the .catch() previously erased any signal
+    // of failure entirely).
+    console.warn('[youtube] cancel IPC failed:', err);
+    throw err;
   }
 }
 
