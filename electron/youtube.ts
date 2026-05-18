@@ -638,6 +638,7 @@ async function explainError(res: Response): Promise<string> {
     case 'quotaExceeded':
       return 'YouTube API daily quota exceeded. Try again tomorrow or request a quota increase in Google Cloud Console.';
     case 'rateLimitExceeded':
+    case 'userRateLimitExceeded':
       return 'YouTube rate-limit hit. Wait a minute and try again.';
     case 'liveStreamingNotEnabled':
       return 'This Google account is not enabled for YouTube live streaming. Open https://www.youtube.com/live_dashboard to verify the channel.';

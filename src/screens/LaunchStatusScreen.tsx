@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRightIcon,
   BoltIcon,
@@ -61,10 +61,22 @@ export default function LaunchStatusScreen({ settings, user, onBack, onOpenDashb
   const obsStatus = useObsStatus();
   const health = useStreamHealth();
 
+  // A launch sequence is a fire-once-on-mount operation: it must NOT restart
+  // when `settings` reference changes mid-flight. If the parent re-renders
+  // with a fresh `settings` object (e.g. App passes a non-memoized literal,
+  // or a memo's deps invalidate), re-firing this effect aborts the running
+  // launch, the mutex's cleanup branch disconnects OBS, the disconnect fires
+  // a useObsStatus() change in the parent, the parent re-renders, the cycle
+  // repeats — observable as oscillating OBS connection state and steps 1–5
+  // re-running forever while stuck on step 7. Capturing `settings` once via
+  // a ref keeps the launch tied to mount, not to prop identity. Mid-launch
+  // settings changes are not a supported edit point — the user navigates
+  // back to Create to re-launch.
+  const settingsRef = useRef(settings);
   useEffect(() => {
     const controller = new AbortController();
     runLaunchSequence({
-      settings,
+      settings: settingsRef.current,
       signal: controller.signal,
       onEvent: (event) => {
         if (controller.signal.aborted) return;
@@ -100,7 +112,8 @@ export default function LaunchStatusScreen({ settings, user, onBack, onOpenDashb
       // step:error already surfaces failures via state
     });
     return () => controller.abort();
-  }, [settings]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: see comment above
+  }, []);
 
   const done = broadcast?.status === 'live';
   const totalSteps = LAUNCH_STEPS.length;

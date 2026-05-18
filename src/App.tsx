@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { PlaceholderScreen } from './components/PlaceholderScreen';
 import { Sidebar } from './components/Sidebar';
 import { Spinner } from './components/Spinner';
@@ -147,6 +147,24 @@ export default function App() {
 
   // ---- derived ----
 
+  // Settings handed off to LaunchStatusScreen. We splice the live
+  // userSettings.obsPassword in over streamSettings (which is seeded only
+  // once at boot — see seededFromUserDefaults above) so a password set in
+  // Settings between Go Live attempts actually reaches the orchestrator.
+  //
+  // CRITICAL: this MUST be memoized. LaunchStatusScreen's launch-firing
+  // useEffect depends on the `settings` reference; if we pass a new object
+  // literal on every App render, the effect re-fires on every render. App
+  // re-renders on every useObsStatus() change (which fires at step 7 when
+  // OBS connects), which would abort and restart the launch in a feedback
+  // loop — the mutex's cleanup branch disconnects OBS, which fires another
+  // status change, ad infinitum. Steps 1–5 re-run, OBS oscillates
+  // connected/disconnected, the user is stuck on "Connecting to OBS".
+  const launchSettings = useMemo(
+    () => ({ ...streamSettings, obsPassword: userSettings.obsPassword }),
+    [streamSettings, userSettings.obsPassword],
+  );
+
   const bootstrapping = authBootstrapping || !settingsLoaded;
   const showSidebar = !bootstrapping && user !== null && screen !== 'login';
   const isLive = obsStatus.state === 'streaming';
@@ -239,7 +257,7 @@ export default function App() {
     if (screen === 'launch' && user) {
       return (
         <LaunchStatusScreen
-          settings={streamSettings}
+          settings={launchSettings}
           user={user}
           onBack={() => setScreen('create')}
           onOpenDashboard={() => setScreen('dash')}
