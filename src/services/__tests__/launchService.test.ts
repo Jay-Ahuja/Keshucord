@@ -480,7 +480,14 @@ describe('mutex & abort', () => {
     await new Promise((r) => setTimeout(r, 400));
 
     ac.abort();
-    await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+    // In real Electron / Node, DOMException('Aborted', 'AbortError') extends Error
+    // and preserves .name. Under vitest's jsdom environment, jsdom's DOMException
+    // does NOT satisfy `instanceof Error`, so the orchestrator's run() helper wraps
+    // it in `new Error(String(err))` → message is "AbortError: Aborted" but .name
+    // is "Error". Asserting on message keeps the test correct in both worlds.
+    await expect(promise).rejects.toMatchObject({
+      message: expect.stringContaining('Abort'),
+    });
 
     // youtube.cancel was called when abort propagated.
     expect(vi.mocked(youtube.cancel)).toHaveBeenCalled();
