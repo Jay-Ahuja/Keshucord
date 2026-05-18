@@ -38,6 +38,8 @@ const SCOPES = [
 const SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
 const TOKEN_REFRESH_LEEWAY_MS = 60_000;
 const REVOKE_TIMEOUT_MS = 5_000;
+const TOKENINFO_ENDPOINT = 'https://oauth2.googleapis.com/tokeninfo';
+const TOKENINFO_TIMEOUT_MS = 5_000;
 
 function log(...args: unknown[]) {
   console.info('[auth]', ...args);
@@ -58,9 +60,40 @@ function hasRequiredYouTubeScope(scope: string | undefined | null): boolean {
   return scope.split(/\s+/).includes(REQUIRED_YOUTUBE_SCOPE);
 }
 
-const INSUFFICIENT_SCOPE_MESSAGE =
-  'Your YouTube sign-in is missing required permissions. Please sign out and sign in again to grant livestream access. ' +
-  "On the Google consent screen, make sure the 'YouTube' permission is selected.";
+/**
+ * Build the user-visible error for the insufficient-scope failure. Includes
+ * the exact requested vs granted scope diff plus a step-by-step remediation
+ * checklist, because the actual fix is almost always in Google Cloud Console
+ * (the OAuth consent screen's allowed-scopes list, the YouTube Data API
+ * enablement, or the Test-Users list) rather than on the user's side. The
+ * generic "sign out and sign in again" wording from the previous fix was
+ * misleading — re-doing the OAuth flow can't add a scope that the Cloud
+ * Console refuses to surface on the consent page in the first place.
+ */
+function buildInsufficientScopeDiagnostic(
+  requested: readonly string[],
+  granted: readonly string[],
+): string {
+  const missing = requested.filter((s) => !granted.includes(s));
+  return [
+    'Sign-in completed but Google did not grant the YouTube permission that Keshucord needs.',
+    '',
+    `Requested scopes: ${requested.join(' ')}`,
+    `Granted scopes:   ${granted.length > 0 ? granted.join(' ') : '<none>'}`,
+    `Missing:          ${missing.join(' ') || '<none>'}`,
+    '',
+    'Re-doing the consent flow CANNOT fix this — Google only surfaces scopes that your OAuth client is configured to allow. Fix steps (one-time, in Google Cloud Console):',
+    '',
+    `1. Open the OAuth consent screen config for your project:`,
+    `   https://console.cloud.google.com/apis/credentials/consent`,
+    `2. Click "EDIT APP" → reach the "Scopes" step → "ADD OR REMOVE SCOPES".`,
+    `3. Filter for "${REQUIRED_YOUTUBE_SCOPE}" and check it. Save.`,
+    `4. Confirm the YouTube Data API v3 is enabled for the project:`,
+    `   https://console.cloud.google.com/apis/library/youtube.googleapis.com`,
+    `5. If "Publishing status" is "Testing", add your Google account under "Test users".`,
+    `6. Then sign in again from Keshucord. The consent screen should now show a YouTube permission row.`,
+  ].join('\n');
+}
 
 export interface AuthUser {
   id: string;
@@ -236,6 +269,12 @@ export async function signIn(): Promise<AuthUser> {
 
   log('signIn: requested scopes =', SCOPES);
 
+  // Proactively clear any pre-existing tokens before the fresh OAuth round-
+  // trip. This guarantees that on a failed sign-in we never silently retain
+  // an old session for a different account / older scope set — sign-in is a
+  // destructive action by design.
+  await tokenStore.clear();
+
   const authUrl = new URL(AUTH_ENDPOINT);
   const params = authUrl.searchParams;
   params.set('client_id', clientId);
@@ -247,16 +286,18 @@ export async function signIn(): Promise<AuthUser> {
   params.set('code_challenge_method', 'S256');
   // `access_type=offline` + `prompt=consent` is the documented combination
   // that guarantees Google returns a refresh_token AND re-shows the consent
-  // screen every sign-in. The latter is critical for recovering from a
-  // partial-scope state — if the user previously unchecked the YouTube
-  // permission, this forces them to re-decide rather than silently re-using
-  // the prior decision.
+  // screen every sign-in — so a user that previously unchecked the YouTube
+  // permission gets a fresh chance to grant it. We deliberately do NOT pass
+  // `include_granted_scopes=true`: in some flows it caused the token to
+  // reuse a prior partial-scope grant rather than honouring the explicit
+  // re-request, which was actively masking this bug.
   params.set('access_type', 'offline');
   params.set('prompt', 'consent');
-  // Incremental authorization: include previously-granted scopes in the
-  // exchanged token. Harmless when there are no prior grants; useful when
-  // the user has previously consented to some but not all of our scopes.
-  params.set('include_granted_scopes', 'true');
+
+  log(
+    `signIn: opening consent at client_id=...${clientId.slice(-8)} redirect=${redirectUri} ` +
+      `(scope param length=${SCOPES.join(' ').length})`,
+  );
 
   await shell.openExternal(authUrl.toString());
 
@@ -270,7 +311,33 @@ export async function signIn(): Promise<AuthUser> {
     redirectUri,
   });
 
-  log('signIn: granted scopes =', tokens.scope || '<missing>');
+  // Log the full shape of the exchange response (without secret values) so
+  // diagnosing user-reported sign-in failures from logs is unambiguous.
+  log('signIn: token exchange response shape =', {
+    hasAccessToken: !!tokens.access_token,
+    hasRefreshToken: !!tokens.refresh_token,
+    expiresIn: tokens.expires_in,
+    tokenType: tokens.token_type,
+    scope: tokens.scope || '<missing>',
+  });
+
+  // Independent verification: ask Google's tokeninfo endpoint what scopes it
+  // actually associates with this access token. If the exchange response and
+  // tokeninfo disagree we've found something genuinely weird; if they agree
+  // and both lack `youtube.force-ssl` we can be certain Google is the source
+  // of the missing scope (i.e. the Cloud Console consent screen).
+  const tokenInfo = await probeTokenInfo(tokens.access_token);
+  log('signIn: tokeninfo verification =', tokenInfo ?? '<unavailable>');
+
+  // Pick the broadest reasonable view of granted scopes: prefer tokeninfo
+  // (auth-server source of truth) and fall back to the exchange response.
+  const grantedScopes = parseScopeString(tokenInfo?.scope ?? tokens.scope ?? '');
+  const missingScopes = SCOPES.filter((s) => !grantedScopes.includes(s));
+  log('signIn: scope diff =', {
+    requested: SCOPES,
+    granted: grantedScopes,
+    missing: missingScopes,
+  });
 
   if (!tokens.refresh_token) {
     // Best-effort revoke so we don't leave a token lingering on Google's side
@@ -281,31 +348,36 @@ export async function signIn(): Promise<AuthUser> {
     );
   }
 
-  if (!hasRequiredYouTubeScope(tokens.scope)) {
+  if (!grantedScopes.includes(REQUIRED_YOUTUBE_SCOPE)) {
     log(
-      'signIn: granted scope is missing the required YouTube scope — revoking partial token and prompting re-consent. ' +
-        `granted="${tokens.scope ?? ''}", required="${REQUIRED_YOUTUBE_SCOPE}"`,
+      'signIn: granted scopes are missing the required YouTube scope — revoking partial token. ' +
+        `granted="${grantedScopes.join(' ')}", required="${REQUIRED_YOUTUBE_SCOPE}"`,
     );
     // Don't store these tokens — they're useless to us. Revoke them on
     // Google's side so the user's Google account doesn't accumulate dead
     // grants for our app.
     await bestEffortRevoke(tokens.access_token);
     if (tokens.refresh_token) await bestEffortRevoke(tokens.refresh_token);
-    throw new Error(INSUFFICIENT_SCOPE_MESSAGE);
+    throw new Error(buildInsufficientScopeDiagnostic(SCOPES, grantedScopes));
   }
 
   let user: AuthUser;
   try {
     user = await fetchUserProfile(tokens.access_token);
   } catch (err) {
-    // If the userinfo or channels.list call itself returns a 403 with an
-    // insufficient-scope reason, surface the friendly message instead of the
-    // raw Google API error.
+    // If the userinfo or channels.list call returns a 403 with an
+    // insufficient-scope reason despite tokens.scope advertising the scope,
+    // we have a stronger signal: Google's API gateway disagrees with Google's
+    // own token endpoint. This usually means the YouTube Data API v3 isn't
+    // enabled in the project, even though the consent screen has the scope.
+    // Surface the same diagnostic so the user sees all remediation steps.
     if (isInsufficientScopeError(err)) {
-      log('signIn: API rejected token despite advertised scope — clearing and prompting re-consent');
+      log(
+        'signIn: API rejected token despite advertised scope — likely YouTube Data API v3 disabled in the project',
+      );
       await bestEffortRevoke(tokens.access_token);
       if (tokens.refresh_token) await bestEffortRevoke(tokens.refresh_token);
-      throw new Error(INSUFFICIENT_SCOPE_MESSAGE);
+      throw new Error(buildInsufficientScopeDiagnostic(SCOPES, grantedScopes));
     }
     throw err;
   }
@@ -550,6 +622,46 @@ function looksLikeInsufficientScope(body: string): boolean {
 
 function isInsufficientScopeError(err: unknown): boolean {
   return err instanceof InsufficientScopeError;
+}
+
+function parseScopeString(scope: string): string[] {
+  return scope.split(/\s+/).filter(Boolean);
+}
+
+interface TokenInfoResponse {
+  scope?: string;
+  expires_in?: string;
+  email?: string;
+  aud?: string;
+}
+
+/**
+ * Hits Google's tokeninfo endpoint to verify what scopes the auth server
+ * actually attributes to a freshly-issued access token. Used as a second
+ * source of truth alongside the token-exchange response's `scope` field —
+ * if the two disagree, the user's logs will surface that disagreement and
+ * make the underlying Google-side bug debuggable. Bounded at 5s and silent
+ * on failure: tokeninfo is purely diagnostic, never load-bearing.
+ */
+async function probeTokenInfo(accessToken: string): Promise<TokenInfoResponse | null> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), TOKENINFO_TIMEOUT_MS);
+  try {
+    const res = await fetch(
+      `${TOKENINFO_ENDPOINT}?access_token=${encodeURIComponent(accessToken)}`,
+      { signal: ac.signal },
+    );
+    if (!res.ok) {
+      log(`probeTokenInfo: ${res.status} ${res.statusText}`);
+      return null;
+    }
+    return (await res.json()) as TokenInfoResponse;
+  } catch (err) {
+    log('probeTokenInfo: failed (non-fatal):', err instanceof Error ? err.message : err);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
