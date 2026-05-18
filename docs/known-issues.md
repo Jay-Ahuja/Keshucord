@@ -31,17 +31,6 @@ attaches it as `avatarColor`. The only historical consumer (`UserChip`
 component) was deleted. The Sidebar's avatar uses a CSS `.avatar` gradient
 directly. This field can be removed from the type and the `decorate()` call.
 
-### `obsService.launchObs()` — stub [stub]
-
-```
-File: src/services/obsService.ts → launchObs()
-```
-
-Resolves after a 200 ms artificial delay. The launch flow does **not** call
-it. Intended for a future feature that would auto-launch OBS if it isn't
-already running. Either implement it (requires a new IPC channel that calls
-`shell.openPath` or `child_process` in the main process) or remove it.
-
 ### `tailwind.config.js` brand/ink palette — dead tokens [debt]
 
 All consumers migrated to oklch tokens in `keshucord.css`. Tailwind purges
@@ -185,9 +174,36 @@ not attempt to reconnect. This is intentional — a silent reconnect
 after an interruption would be misleading. The user must end the stream
 from DashScreen and re-launch.
 
-### `obsService.launchObs()` is a stub [stub]
+### OBS launch on Linux assumes `obs` is on `PATH` [limitation]
 
-See §1 above.
+```
+File: electron/obsProcess.ts → launchLinux()
+```
+
+The Linux launch branch unconditionally spawns `obs` from `PATH`. Distro
+packages and the Flatpak wrapper script both satisfy this, but if a user
+installed OBS into a non-`PATH` location (custom build, AppImage left in
+`~/Downloads`, etc.) the spawn fails with `ENOENT` and the dialog shows
+"Failed to launch OBS". There is no registry/Info.plist analogue we could
+read to discover an alternate location, so this is documented as a
+limitation rather than a bug. The Windows branch in contrast queries the
+registry and falls back to the canonical Program Files install path.
+
+### OBS pre-flight uses `tasklist` / `pgrep` rather than a port probe for detection [limitation]
+
+```
+File: electron/obsProcess.ts → isObsRunning()
+```
+
+`obs:is-running` checks the OS process table. It does NOT verify that the
+OBS WebSocket server is enabled or listening on 4455. A user who has OBS
+open but disabled the WebSocket server in Tools → WebSocket Server
+Settings will pass the pre-flight check, then fail at step 7 (connect-obs)
+with the canonical "Could not reach OBS at ws://localhost:4455" error.
+The launch-OBS dialog won't re-open in that case because OBS *is* running
+— it just isn't reachable. (The renderer-side `obsService.probe()` does
+use a port probe; the OS-process check is intentionally cheaper and only
+answers "should we offer to launch OBS?".)
 
 ## 6. YouTube integration
 

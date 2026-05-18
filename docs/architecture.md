@@ -57,6 +57,7 @@ union in App state plus a sidebar component that calls `setScreen`.
 │    · electron/settingsStore.ts (user settings → settings.enc)        │
 │  - OAuth loopback + PKCE flow      (electron/auth.ts)                │
 │  - YouTube Data API client         (electron/youtube.ts)             │
+│  - OBS OS-process detection + spawn (electron/obsProcess.ts)         │
 │  - IPC handler registration        (electron/ipc.ts)                 │
 └──────────────────────────────────────────────────────────────────────┘
                 ▲
@@ -64,11 +65,13 @@ union in App state plus a sidebar component that calls `setScreen`.
                 │   auth:sign-in / auth:sign-out / auth:get-current-user
                 │   settings:load / settings:save / settings:reset
                 │   youtube:create-broadcast / :create-stream / :bind / …
+                │   youtube:cancel
+                │   obs:is-running / obs:launch
                 │
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Preload script          (Bridge, sandboxed)                         │
 │  - electron/preload.ts                                               │
-│  - Exposes `window.keshucord.{auth, youtube, settings}` via          │
+│  - Exposes `window.keshucord.{auth, youtube, settings, obs}` via     │
 │    contextBridge.exposeInMainWorld()                                 │
 │  - Renderer never sees ipcRenderer directly                          │
 └──────────────────────────────────────────────────────────────────────┘
@@ -109,6 +112,7 @@ Keshucord/
 │   ├── auth.ts                    PKCE + loopback OAuth, token refresh
 │   ├── tokenStore.ts              tokens.enc read/write/clear
 │   ├── settingsStore.ts           settings.enc read/write/reset
+│   ├── obsProcess.ts              OS-process detection + spawn for the OBS pre-flight gate
 │   └── youtube.ts                 fetch-based YouTube Data API client
 ├── src/
 │   ├── App.tsx                    Top-level state machine + routing
@@ -119,6 +123,7 @@ Keshucord/
 │   ├── components/                Shared UI primitives
 │   │   ├── Icons.tsx              All SVG icons in one file
 │   │   ├── IngestionInfoCard.tsx  RTMP URL + stream-key reveal
+│   │   ├── ObsLaunchDialog.tsx    Pre-flight launch-OBS modal (prompt/launching/error)
 │   │   ├── PlaceholderScreen.tsx  "Coming soon" empty state
 │   │   ├── Sidebar.tsx            Persistent left rail
 │   │   ├── Spinner.tsx            Bootstrap loader (only Tailwind-classed component left)
@@ -172,6 +177,7 @@ There is no "backend" in the conventional sense — no server, no database.
 | User settings persistence | main (`settingsStore.ts` → `settings.enc`) | Same `safeStorage` requirement. |
 | OBS WebSocket | **renderer** (`obsService.ts`) | Pure WebSocket; browser-compatible. No reason to add an IPC hop. |
 | OBS health polling, bitrate buffer | renderer (`obsService.ts` module scope) | Co-located with the WebSocket. |
+| OBS OS-process detection + spawn | main (`electron/obsProcess.ts`) | Needs `child_process` (`tasklist` / `pgrep`, OBS spawn) + a Windows registry read. Distinct from the renderer-side WebSocket — this layer only answers "is the executable running?" and "can we launch it?". |
 | Stream-launch orchestration | renderer (`launchService.ts`) | Combines YouTube IPC calls + OBS WebSocket calls + UI events. |
 | Screen routing, form state, UI | renderer (`App.tsx` + screens) | Standard React. |
 
@@ -282,6 +288,20 @@ settlement (including cleanup) before starting. This is the fix for the
 stream-key race described in [`obs-flow.md`](./obs-flow.md) and
 [`youtube-flow.md`](./youtube-flow.md).
 
+**Pre-flight gate (added in 0.2.0).** Before `runLaunchSequence` is ever
+invoked, `CreateScreen`'s Go Live handler runs a fast OBS reachability
+probe via `obsService.probe()` (raw WebSocket open to `ws://localhost:4455`,
+no Identify handshake, no module-state mutation). If OBS is reachable the
+handoff to the orchestrator proceeds normally. If it isn't, the
+`ObsLaunchDialog` opens and offers to spawn OBS via the `obs:launch` IPC
+channel, then polls `probe()` until the port is up — at which point the
+dialog calls back into CreateScreen, which then submits to the launch
+flow. This pre-flight is **not** a new step in the 10-step sequence — the
+orchestrator and its mutex are unchanged, the 10 steps still execute in
+exactly the same order, and the existing step-1 password validation still
+runs. The pre-flight only gates whether `runLaunchSequence` gets called
+at all.
+
 The 10 steps:
 
 ```
@@ -389,7 +409,6 @@ makes the sidebar-compact toggle and accent swatches feel instant.
 | `src/utils/delay.ts` | unused module | Was used by mocks pre-real-API; can be deleted. |
 | `userSettings.appearanceDensity`, `userSettings.appearanceReduceMotion` | `types/settings.ts` + Settings UI | Persisted and editable, but no CSS hooks consume them yet. |
 | `YouTubeUser.avatarColor` | `types/youtube.ts`, `youtubeService.decorate` | Still produced (hashed gradient) but the only consumer (`UserChip`) was deleted. Sidebar uses CSS `.avatar` gradient directly. |
-| `obsService.launchObs()` | `obsService.ts` | Stub that resolves after 200 ms. The launch flow does **not** call it. Could be removed. |
 | `applyAccent` writes are not persisted to `:root` early | `App.tsx` `useEffect` runs after first paint | The user might see a 1-frame flash of the default accent on first launch. Cosmetic. |
 | `tailwind.config.js` `brand-*` / `ink-*` palette | unused | All consumers migrated to oklch tokens. The unused colors don't appear in the bundle (Tailwind purges) but the config block is dead. |
 | `Open in YouTube` / `Copy share link` buttons | `LaunchStatusScreen.tsx` | No toast feedback after click. |
@@ -416,9 +435,6 @@ makes the sidebar-compact toggle and accent swatches feel instant.
 - **Real-time event log.** Plumb a unified event bus into a renderer-side
   store so DashScreen's event feed can show OBS state transitions, launch
   steps, and YouTube transitions. This would also benefit support/debugging.
-- **Auto-launch OBS process.** `obsService.launchObs()` is currently a stub.
-  Real implementation requires `shell.openPath` or `child_process` in the
-  main process behind a new IPC channel.
 - **Restoring "Reduce motion".** Need a CSS class gate (`.app[data-reduce-motion]`) and a corresponding media-query in keshucord.css. Mechanical change once we commit to it.
 - **Internationalization.** All strings are inline literals. If we ever
   localize, the i18n insertion points are the screen files and a handful of

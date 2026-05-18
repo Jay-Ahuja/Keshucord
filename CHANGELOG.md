@@ -9,6 +9,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 > Changes on the current branch not yet on `main`.
 
+### Added
+- OBS pre-flight: clicking Go Live now detects whether OBS Studio is
+  running via a fast WebSocket probe before the launch sequence starts.
+  If OBS isn't reachable, a dialog offers to launch OBS automatically
+  (cross-platform — Windows registry lookup with `bin/64bit/` cwd
+  handling, macOS `open -a OBS`, Linux PATH lookup); the dialog polls
+  for reachability and proceeds to the launch flow once OBS is up. New
+  IPC channels: `obs:is-running`, `obs:launch`. New main-process module:
+  `electron/obsProcess.ts`. New renderer component:
+  `src/components/ObsLaunchDialog.tsx`. New `obsService` exports:
+  `probe()`, `launchAndWait()`, `ObsLaunchError`.
+
+### Fixed
+- CreateScreen no longer blocks the Go Live click when the OBS WebSocket
+  password isn't set — the new pre-flight dialog needs to surface
+  BEFORE asking the user to set credentials for a service they haven't
+  opened yet. The orchestrator still validates the password as step 1
+  of the launch sequence, so missing-password is still caught (just
+  after OBS is up). The pre-flight side panel still surfaces the
+  missing-password state informationally.
+- App.tsx now injects the live `userSettings.obsPassword` into the
+  settings handed to LaunchStatusScreen at handoff time, so a password
+  set in Settings between Go Live attempts actually reaches the
+  orchestrator. `streamSettings` is seeded from `userSettings` exactly
+  once at boot for form-edit-preservation reasons; the password is not
+  a form field so it shouldn't share that seeding lifecycle.
+- App.tsx memoizes the launch-settings object handed to
+  LaunchStatusScreen. Without memoization a fresh object literal was
+  allocated on every App render, which — combined with the launch-firing
+  useEffect in LaunchStatusScreen depending on `settings` — caused a
+  feedback loop: each OBS status change at step 7 re-rendered App, re-fired
+  the effect, aborted and restarted the launch, which disconnected OBS
+  during cleanup, which fired another status change. Visible as steps
+  1–5 re-running while stuck on step 7 and OBS oscillating
+  connected/disconnected. The launchService mutex's serial cleanup
+  prevented orphan broadcasts, but the sheer API-call volume tripped
+  YouTube's `userRateLimitExceeded`.
+- LaunchStatusScreen now captures the `settings` prop via a ref and
+  uses `[]` deps on the launch-firing useEffect. Defense-in-depth: even
+  if a future contributor passes a non-memoized settings prop from App,
+  the launch can no longer be re-triggered mid-flight by an upstream
+  prop identity change.
+- `electron/youtube.ts` `explainError` now maps `userRateLimitExceeded`
+  to the same friendly "rate-limit hit, wait a minute" message that
+  `rateLimitExceeded` already had. The two reasons are siblings (both
+  403 rate-limit — project quota vs per-user quota), but only the
+  latter was previously mapped; the per-user variant fell through to
+  the raw API string.
+
 ### Documentation
 - Added `docs/electron-ipc.md` — complete IPC channel registry and security model.
 - Added `docs/design-system.md` — token system, component classes, accent architecture.
@@ -17,6 +66,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added `docs/error-catalog.md` — centralized error message reference.
 - Added `docs/testing.md` — recommended testing strategy and manual checklist.
 - `docs/launch-flow.md` already existed as an untracked file.
+- Updated `docs/electron-ipc.md` for the new `obs:*` channels, the
+  `youtube:cancel` channel that was in the code but not documented, the
+  17-channel total, and the `ObsLaunchResultPayload` type.
+- Updated `docs/architecture.md`: documented the pre-flight gate in §9
+  (without inflating the canonical 10-step sequence), added the
+  `electron/obsProcess.ts` module + `ObsLaunchDialog` component to §3 /
+  §4, added the OBS OS-process row to §5, and removed the
+  `obsService.launchObs()` stub entries from §11 and §12 (the stub has
+  been replaced with the real `probe()` + `launchAndWait()`
+  implementation).
+- Updated `docs/known-issues.md`: removed the `obsService.launchObs()`
+  stub entries from §1 and §5; documented two minor remaining gaps in
+  the new code (Linux `PATH`-only OBS launch; `obs:is-running` is a
+  process-table check, not a WebSocket-enabled check).
 
 ---
 
