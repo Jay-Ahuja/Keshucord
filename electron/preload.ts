@@ -45,6 +45,14 @@ export interface StreamIngestionInfoPayload {
   backupRtmpUrl?: string;
 }
 
+/**
+ * Result of an `obs:launch` IPC call. On failure the `reason` is a
+ * user-displayable string suitable for surfacing directly in a banner.
+ */
+export type ObsLaunchResultPayload =
+  | { ok: true }
+  | { ok: false; reason: string };
+
 export interface PersistedSettingsPayload {
   obsPassword: string;
   defaultTitle: string;
@@ -91,6 +99,16 @@ const api = {
     load: (): Promise<PersistedSettingsPayload> => ipcRenderer.invoke('settings:load'),
     save: (s: PersistedSettingsPayload): Promise<void> => ipcRenderer.invoke('settings:save', s),
     reset: (): Promise<PersistedSettingsPayload> => ipcRenderer.invoke('settings:reset'),
+  },
+  obs: {
+    /** True iff an OBS Studio process is currently running on the host. */
+    isRunning: (): Promise<boolean> => ipcRenderer.invoke('obs:is-running'),
+    /**
+     * Spawn OBS Studio detached from the Electron process. Resolves to
+     * `{ ok: true }` once the OS hand-off succeeds, or
+     * `{ ok: false, reason }` with a user-displayable error message.
+     */
+    launch: (): Promise<ObsLaunchResultPayload> => ipcRenderer.invoke('obs:launch'),
   },
 };
 
