@@ -251,12 +251,12 @@ async function resolveWindowsObsPath(): Promise<string | null> {
   const fromRegistry = await readObsInstallPathFromRegistry();
   if (fromRegistry) {
     const exe = path.join(fromRegistry, 'bin', '64bit', 'obs64.exe');
-    if (await fileExists(exe)) {
+    if (isPlausibleObsExePath(exe) && (await fileExists(exe))) {
       console.log(`${LOG_PREFIX} install path from registry: ${exe}`);
       return exe;
     }
     console.warn(
-      `${LOG_PREFIX} registry-resolved exe missing on disk (${exe}); trying fallback`,
+      `${LOG_PREFIX} registry-resolved exe rejected or missing on disk (${exe}); trying fallback`,
     );
   }
 
@@ -266,6 +266,28 @@ async function resolveWindowsObsPath(): Promise<string | null> {
   }
 
   return null;
+}
+
+/**
+ * Sanity-checks an exe path returned via the Windows registry before we
+ * hand it to `spawn`. The registry's `HKLM\SOFTWARE\OBS Studio` default
+ * value is writable only by Administrator under normal Windows ACLs, so
+ * this is NOT a privilege-escalation defense — a malicious admin can
+ * already do worse. The check exists to defend against the *non*-
+ * adversarial cases:
+ *   - the registry value points at a stale install location after the
+ *     user moved OBS,
+ *   - a Wow6432Node mirror disagrees with the 64-bit view,
+ *   - a third-party "OBS-compatible" installer wrote a different exe.
+ *
+ * Accepts only paths that end with `\bin\64bit\obs64.exe` (case-insensitive)
+ * and contain no `..` segments — i.e. the canonical OBS install layout.
+ * Anything else falls back to the well-known Program Files path.
+ */
+function isPlausibleObsExePath(p: string): boolean {
+  if (p.includes('..')) return false;
+  const lower = p.toLowerCase().replace(/\//g, '\\');
+  return lower.endsWith('\\bin\\64bit\\obs64.exe');
 }
 
 /**

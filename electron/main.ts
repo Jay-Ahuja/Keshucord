@@ -3,7 +3,13 @@ import { app, BrowserWindow, shell } from 'electron';
 import path from 'node:path';
 import { registerIpcHandlers } from './ipc';
 
-const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+// Strict dev-mode gate. Previously this also accepted `!app.isPackaged`,
+// which flipped DevTools open for any unpackaged build — including QA
+// running `npm run build && npm start` against a production bundle.
+// Combined with stream keys / cached profile data living in the React
+// tree, that was a credential-disclosure risk in screenshares.
+// DevTools now requires an explicit NODE_ENV=development. (Audit M2.)
+const isDev = process.env.NODE_ENV === 'development';
 
 function createWindow() {
   const win = new BrowserWindow({

@@ -33,12 +33,34 @@ function maskKey(key: string | undefined | null): string {
 // when its launch is aborted — that calls `cancelAllInFlight()` here, which
 // aborts every registered controller. The next per-attempt timeout / retry
 // check in `call()` will then unwind the operation.
+//
+// `pendingCancel` closes a narrow IPC-dispatch race window (audit M6): when
+// the renderer fires `youtube:create-broadcast` and then aborts before the
+// main-side handler has entered `withOperationAbort` (sub-50ms in normal
+// conditions but stretches under load), the cancelAllInFlight call sees
+// an empty `activeOperations` set and no-ops. The IPC create-broadcast
+// then completes in main and produces an orphan broadcast that nothing
+// in the app tracks. The pending-cancel flag tells *newly-registered*
+// operations to abort themselves on entry if a cancel arrived during the
+// dispatch window; it auto-clears after `PENDING_CANCEL_GRACE_MS` so a
+// later, legitimate operation isn't pre-empted.
 
 const activeOperations = new Set<AbortController>();
+let pendingCancel = false;
+let pendingCancelTimer: ReturnType<typeof setTimeout> | null = null;
+const PENDING_CANCEL_GRACE_MS = 250;
 
 async function withOperationAbort<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const controller = new AbortController();
   activeOperations.add(controller);
+  if (pendingCancel) {
+    // A cancel landed during this op's IPC dispatch window. Abort
+    // immediately so the next per-attempt check inside `call()` throws
+    // and the orchestrator's cleanup branch deletes any resource the
+    // op might have created.
+    log('withOperationAbort: pendingCancel set on entry — aborting newly-registered controller');
+    controller.abort();
+  }
   try {
     return await fn(controller.signal);
   } finally {
@@ -47,7 +69,20 @@ async function withOperationAbort<T>(fn: (signal: AbortSignal) => Promise<T>): P
 }
 
 export function cancelAllInFlight(): void {
-  if (activeOperations.size === 0) return;
+  // Always set the pending-cancel flag, even when activeOperations is
+  // empty — that's the race window M6 closes. Clear it after a brief
+  // grace period so subsequent unrelated work isn't pre-empted.
+  pendingCancel = true;
+  if (pendingCancelTimer) clearTimeout(pendingCancelTimer);
+  pendingCancelTimer = setTimeout(() => {
+    pendingCancel = false;
+    pendingCancelTimer = null;
+  }, PENDING_CANCEL_GRACE_MS);
+
+  if (activeOperations.size === 0) {
+    log('cancelAllInFlight: no in-flight ops yet — pendingCancel armed for the dispatch-race window');
+    return;
+  }
   log(`cancelAllInFlight: aborting ${activeOperations.size} in-flight operation(s)`);
   for (const c of activeOperations) c.abort();
   // Don't clear here — each registered op clears itself in its finally block.
