@@ -58,7 +58,7 @@ const SHORTCUTS: [string, string][] = [
 ];
 
 export default function SettingsScreen({ user, onSignOut }: Props) {
-  const { settings, save, reset } = useSettings();
+  const { settings, save, reset, loadFailed } = useSettings();
   const obsStatus = useObsStatus();
 
   const [tab, setTab] = useState<TabId>('connections');
@@ -88,6 +88,27 @@ export default function SettingsScreen({ user, onSignOut }: Props) {
           <SyncStatusChip savedAt={savedAt} error={saveError} />
         </div>
       </div>
+
+      {loadFailed && (
+        <div
+          role="alert"
+          style={{
+            marginBottom: 16,
+            borderRadius: 10,
+            border: '1px solid oklch(0.66 0.22 22 / 0.4)',
+            background: 'oklch(0.66 0.22 22 / 0.08)',
+            padding: '12px 14px',
+            color: 'oklch(0.92 0.06 22)',
+            fontSize: 12.5,
+            lineHeight: 1.55,
+          }}
+        >
+          ⚠ Couldn't load your saved settings — the app is using defaults.
+          Changes you make here are NOT being saved. Try restarting Keshucord,
+          or check Settings → Advanced → Reset to defaults if the issue
+          persists.
+        </div>
+      )}
 
       <div className="settings">
         <div className="set-tabs">
