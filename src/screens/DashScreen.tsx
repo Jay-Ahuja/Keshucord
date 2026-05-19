@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { BellIcon, ExpandIcon, PauseIcon } from '../components/Icons';
 import { obsService, youtubeService } from '../services';
 import type { OBSConnectionState, StreamHealth } from '../types';
@@ -120,10 +120,40 @@ export default function DashScreen({ broadcastId, onEnded }: Props) {
     };
   }, [bitrateHistory]);
 
+  // Clear a stale end-stream error when the broadcast id transitions to null
+  // (a new launch is starting; the prior error is no longer relevant).
+  useEffect(() => {
+    if (!broadcastId) setEndStreamError(null);
+  }, [broadcastId]);
+
   const handleEndStream = async () => {
-    if (!isStreaming || endStreamBusy) return;
-    setEndStreamBusy(true);
+    // Always clear the prior error on a fresh click so the banner reflects
+    // only the current attempt. Capture whether we had a previous error
+    // first, so we can detect the YouTube-only retry path below.
+    const hadPreviousError = endStreamError !== null;
     setEndStreamError(null);
+    if (endStreamBusy) return;
+    // Retry-only branch: OBS already stopped on the failed first attempt,
+    // retrying only the YouTube half. Reachable when streaming is false but
+    // a stale broadcastId + endStreamError pair survives.
+    if (!isStreaming && broadcastId && hadPreviousError) {
+      setEndStreamBusy(true);
+      try {
+        await youtubeService.transitionToComplete(broadcastId);
+        onEnded();
+      } catch (ytErr) {
+        const msg = ytErr instanceof Error ? ytErr.message : 'Failed to end YouTube broadcast.';
+        // Keep broadcastId in App state (don't call onEnded) so another retry
+        // can hit the same transition.
+        setEndStreamError(
+          `OBS stopped, but ending the YouTube broadcast failed: ${msg} You can retry, or end the broadcast from YouTube Studio.`,
+        );
+      }
+      setEndStreamBusy(false);
+      return;
+    }
+    if (!isStreaming) return;
+    setEndStreamBusy(true);
     try {
       await obsService.stopStreaming();
     } catch (err) {
@@ -155,6 +185,9 @@ export default function DashScreen({ broadcastId, onEnded }: Props) {
     }
     setEndStreamBusy(false);
   };
+
+  const isRetryingYouTube =
+    !isStreaming && endStreamError !== null && broadcastId !== null && !endStreamBusy;
 
   const conn = obsConnectionRow(obsStatus.state);
   const bitrate = bitrateMetric(health, obsStatus.state);
@@ -197,14 +230,21 @@ export default function DashScreen({ broadcastId, onEnded }: Props) {
             type="button"
             className="btn live-go"
             onClick={handleEndStream}
-            disabled={!isStreaming || endStreamBusy}
+            disabled={(!isStreaming && !endStreamError) || endStreamBusy || !broadcastId}
             title={
               isStreaming
                 ? 'Stop OBS streaming (the YouTube broadcast will end automatically after no incoming video).'
+                : isRetryingYouTube
+                ? 'Retry ending the YouTube broadcast (OBS has already stopped).'
                 : 'Not currently streaming.'
             }
           >
-            <PauseIcon /> {endStreamBusy ? 'Stopping…' : 'End stream'}
+            <PauseIcon />{' '}
+            {endStreamBusy
+              ? 'Stopping…'
+              : isRetryingYouTube
+              ? 'Retry ending broadcast'
+              : 'End stream'}
           </button>
         </div>
       </div>
