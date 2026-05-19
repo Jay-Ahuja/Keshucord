@@ -307,6 +307,115 @@ describe('configureStreamService', () => {
       vi.useRealTimers();
     }
   });
+
+  it('M1: stream keys never appear cleartext in logs on a verification-failure path', async () => {
+    // Audit M1 — the renderer console must not log the cleartext stream key
+    // on either the "before" snapshot or the verification-failed payload.
+    // A leak here is equivalent to a credential leak: anyone with DevTools
+    // open or capturing logs can hijack the live broadcast.
+    vi.useFakeTimers();
+    const logSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    try {
+      await arriveConnected();
+      const mock = obsMock();
+      mock.call.mockImplementation(async (command: string) => {
+        if (command === 'GetStreamServiceSettings') {
+          // Cleartext key in BOTH the pre-change snapshot (old key) and the
+          // post-write read (key never flipped). Both flow through the two
+          // log sites M1 addresses.
+          return {
+            streamServiceType: 'rtmp_custom',
+            streamServiceSettings: {
+              server: 'rtmp://a.rtmp.youtube.com/live2',
+              key: 'PREVIOUS-SECRET-1234',
+            },
+          };
+        }
+        return {};
+      });
+
+      const promise = obsService
+        .configureStreamService({
+          rtmpUrl: 'rtmp://a.rtmp.youtube.com/live2',
+          streamKey: 'NEW-SECRET-KEY-9999',
+        })
+        .catch((e) => e);
+      await vi.advanceTimersByTimeAsync(3500);
+      await promise;
+
+      const everyLogLine = logSpy.mock.calls
+        .map((args) =>
+          args
+            .map((a) =>
+              typeof a === 'string' ? a : (() => {
+                try {
+                  return JSON.stringify(a);
+                } catch {
+                  return String(a);
+                }
+              })(),
+            )
+            .join(' '),
+        )
+        .join('\n');
+
+      // Neither full key may appear; the masked suffix (last 4 chars) is
+      // the only acceptable trace.
+      expect(everyLogLine).not.toContain('PREVIOUS-SECRET-1234');
+      expect(everyLogLine).not.toContain('NEW-SECRET-KEY-9999');
+      // Masked form should be present (sanity check that the log fired at
+      // all and the redaction path ran).
+      expect(everyLogLine).toMatch(/…9999/);
+    } finally {
+      logSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ---- forceStopStream ----
+
+describe('forceStopStream', () => {
+  it('M4: issues StopStream regardless of local status state (covers the StreamStateChanged race)', async () => {
+    // arriveConnected leaves state at 'connected' (StreamStateChanged for
+    // outputActive=true has NOT fired). The guarded stopStreaming() would
+    // no-op here; forceStopStream must NOT.
+    await arriveConnected();
+    expect(obsService.getStatus().state).toBe('connected');
+
+    const mock = obsMock();
+    mock.call.mockResolvedValue({});
+
+    await obsService.forceStopStream();
+
+    const stopCall = mock.call.mock.calls.find((c: unknown[]) => c[0] === 'StopStream');
+    expect(stopCall).toBeDefined();
+  });
+
+  it('M4: issues StopStream when state IS "streaming" (parity with stopStreaming on the happy side of the race)', async () => {
+    await arriveConnected();
+    obsMock().__fire('StreamStateChanged', { outputActive: true });
+    expect(obsService.getStatus().state).toBe('streaming');
+
+    const mock = obsMock();
+    mock.call.mockResolvedValue({});
+
+    await obsService.forceStopStream();
+
+    const stopCall = mock.call.mock.calls.find((c: unknown[]) => c[0] === 'StopStream');
+    expect(stopCall).toBeDefined();
+  });
+
+  it('M4: propagates errors from OBS so cleanup can decide whether to swallow them', async () => {
+    await arriveConnected();
+    const mock = obsMock();
+    mock.call.mockImplementation(async (command: string) => {
+      if (command === 'StopStream') throw new Error('OBS unreachable');
+      return {};
+    });
+
+    await expect(obsService.forceStopStream()).rejects.toThrow('OBS unreachable');
+  });
 });
 
 // ---- assertActiveStreamServiceSettings ----

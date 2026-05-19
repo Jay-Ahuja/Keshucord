@@ -39,6 +39,35 @@ function maskKey(key: string): string {
   return key ? `…${key.slice(-4)} (len=${key.length})` : '<empty>';
 }
 
+/**
+ * Returns a redacted view of an OBS stream-service-settings object suitable
+ * for logging. The raw `key` field carries a YouTube stream key in
+ * cleartext; replace it with the same `maskKey()` shape used elsewhere so
+ * the renderer console / captured logs never contain the credential.
+ *
+ * Defensive: handles missing / non-string keys without throwing.
+ */
+function redactStreamServiceSettings(
+  s: RawStreamServiceSettings | undefined | null,
+): unknown {
+  if (!s) return s;
+  const inner = s.streamServiceSettings;
+  if (!inner) return { streamServiceType: s.streamServiceType };
+  const rawKey = typeof inner.key === 'string' ? inner.key : '';
+  return {
+    streamServiceType: s.streamServiceType,
+    streamServiceSettings: {
+      server: inner.server,
+      service: inner.service,
+      key: maskKey(rawKey),
+    },
+  };
+}
+
+function redactStreamServiceConfig(config: StreamServiceConfig): unknown {
+  return { rtmpUrl: config.rtmpUrl, streamKey: maskKey(config.streamKey) };
+}
+
 function statusEquals(a: OBSConnectionStatus, b: OBSConnectionStatus): boolean {
   return (
     a.state === b.state &&
@@ -470,7 +499,7 @@ export async function configureStreamService(config: StreamServiceConfig): Promi
   let before: RawStreamServiceSettings = {};
   try {
     before = (await obs.call('GetStreamServiceSettings')) as RawStreamServiceSettings;
-    log('current stream service before change:', JSON.stringify(before));
+    log('current stream service before change:', redactStreamServiceSettings(before));
   } catch (err) {
     log('could not read current stream service:', err);
   }
@@ -528,7 +557,10 @@ export async function configureStreamService(config: StreamServiceConfig): Promi
       ? lastApplied.streamServiceSettings.server
       : '<none>';
 
-  log('stream service verification FAILED', { expected: config, applied: lastApplied });
+  log('stream service verification FAILED', {
+    expected: redactStreamServiceConfig(config),
+    applied: redactStreamServiceSettings(lastApplied),
+  });
 
   if (isYouTubeManagedConfig(lastApplied) || wasYouTubeManaged) {
     throw new Error(
@@ -713,6 +745,37 @@ export async function stopStreaming(): Promise<OBSConnectionStatus> {
       `OBS refused to stop streaming: ${err instanceof Error ? err.message : 'unknown error'}`,
     );
   }
+}
+
+/**
+ * Unconditionally issues a `StopStream` to OBS, bypassing the
+ * `status.state === 'streaming'` guard that `stopStreaming` enforces.
+ *
+ * Used by the launch cleanup branch when `obsProgress === 'streaming'` —
+ * the orchestrator marks `obsProgress` optimistically BEFORE OBS emits
+ * `StreamStateChanged(outputActive=true)`, so a verify-loop timeout can
+ * leave us in a window where:
+ *   - the orchestrator believes OBS is streaming (correctly — OBS may
+ *     have accepted StartStream and be about to push video), but
+ *   - local `status.state` is still `'connected'` (StreamStateChanged
+ *     not yet observed).
+ * In that window `stopStreaming()` no-ops on the guard, then `disconnect`
+ * severs the WebSocket, and OBS pushes RTMP to a tombstoned broadcast
+ * for the next 10–30 s. `forceStopStream` issues the StopStream anyway
+ * so we cleanly tear down whichever side of the race actually won.
+ *
+ * Bounded by `timeoutMs` (default 5 s). Errors are propagated so the
+ * caller can decide whether to swallow them (cleanup) or surface them
+ * (anywhere else). Does NOT mutate `status` — `StreamStateChanged` or
+ * `ConnectionClosed` will drive that transition through `setStatus`.
+ */
+export async function forceStopStream(timeoutMs = 5_000): Promise<void> {
+  log(`calling StopStream (forced, state="${status.state}")`);
+  await withTimeout(
+    obs.call('StopStream').then(() => undefined),
+    timeoutMs,
+    'forceStopStream timed out',
+  );
 }
 
 // ---- Test (used by the setup-screen button) ----
