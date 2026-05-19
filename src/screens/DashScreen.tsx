@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { BellIcon, ExpandIcon, PauseIcon } from '../components/Icons';
-import { obsService } from '../services';
+import { obsService, youtubeService } from '../services';
 import type { OBSConnectionState, StreamHealth } from '../types';
 import { formatDuration } from '../utils/format';
 import { useBitrateHistory } from '../utils/useBitrateHistory';
@@ -89,7 +89,12 @@ function obsConnectionRow(state: OBSConnectionState): { dot: string; sub: string
   }
 }
 
-export default function DashScreen() {
+interface Props {
+  broadcastId: string | null;
+  onEnded: () => void;
+}
+
+export default function DashScreen({ broadcastId, onEnded }: Props) {
   const obsStatus = useObsStatus();
   const health = useStreamHealth();
   const bitrateHistory = useBitrateHistory();
@@ -123,9 +128,32 @@ export default function DashScreen() {
       await obsService.stopStreaming();
     } catch (err) {
       setEndStreamError(err instanceof Error ? err.message : 'Failed to stop OBS streaming.');
-    } finally {
       setEndStreamBusy(false);
+      // Don't call YouTube if OBS didn't stop — bail early so the user can
+      // retry. Transitioning the broadcast to `complete` while OBS is still
+      // pushing would end the YouTube broadcast but leave OBS streaming into
+      // a dead endpoint, which is worse than the original failure.
+      return;
     }
+    if (broadcastId) {
+      try {
+        await youtubeService.transitionToComplete(broadcastId);
+        onEnded();
+      } catch (ytErr) {
+        const msg = ytErr instanceof Error ? ytErr.message : 'Failed to end YouTube broadcast.';
+        // OBS has already stopped — we deliberately do NOT roll that back.
+        // The user gets actionable copy and can either retry or finish the
+        // broadcast from YouTube Studio. We also intentionally do NOT call
+        // onEnded() here: keeping `broadcastId` in App state lets a retry
+        // hit the same transition.
+        setEndStreamError(
+          `OBS stopped, but ending the YouTube broadcast failed: ${msg} You can retry, or end the broadcast from YouTube Studio.`,
+        );
+      }
+    } else {
+      onEnded();
+    }
+    setEndStreamBusy(false);
   };
 
   const conn = obsConnectionRow(obsStatus.state);

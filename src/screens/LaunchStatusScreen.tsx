@@ -25,6 +25,7 @@ interface Props {
   user: YouTubeUser;
   onBack: () => void;
   onOpenDashboard: () => void;
+  onBroadcastLive: (broadcast: YouTubeBroadcast) => void;
 }
 
 type StatusMap = Record<LaunchStepId, LaunchStepStatus>;
@@ -51,7 +52,13 @@ function rowStateFor(status: LaunchStepStatus): RowState {
 const RING_RADIUS = 88;
 const RING_CIRC = 2 * Math.PI * RING_RADIUS;
 
-export default function LaunchStatusScreen({ settings, user, onBack, onOpenDashboard }: Props) {
+export default function LaunchStatusScreen({
+  settings,
+  user,
+  onBack,
+  onOpenDashboard,
+  onBroadcastLive,
+}: Props) {
   const [statuses, setStatuses] = useState<StatusMap>(initialStatuses);
   const [details, setDetails] = useState<Partial<Record<LaunchStepId, string>>>({});
   const [broadcast, setBroadcast] = useState<YouTubeBroadcast | null>(null);
@@ -73,6 +80,10 @@ export default function LaunchStatusScreen({ settings, user, onBack, onOpenDashb
   // settings changes are not a supported edit point — the user navigates
   // back to Create to re-launch.
   const settingsRef = useRef(settings);
+  // Same ref-capture defense as settingsRef: even if the parent passes a
+  // non-stable callback, we read it via a ref so the launch-firing useEffect
+  // below keeps its `[]` deps and never re-fires mid-flight.
+  const onBroadcastLiveRef = useRef(onBroadcastLive);
   useEffect(() => {
     const controller = new AbortController();
     runLaunchSequence({
@@ -105,6 +116,11 @@ export default function LaunchStatusScreen({ settings, user, onBack, onOpenDashb
             break;
           case 'complete':
             setBroadcast(event.broadcast);
+            // Only emit on `complete` (not `broadcast-created`) — that's the
+            // moment the broadcast is actually LIVE on YouTube. DashScreen
+            // needs the live broadcast ID so the End-stream button can
+            // transition it to `complete`.
+            onBroadcastLiveRef.current(event.broadcast);
             break;
         }
       },

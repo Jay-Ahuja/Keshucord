@@ -57,6 +57,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   403 rate-limit — project quota vs per-user quota), but only the
   latter was previously mapped; the per-user variant fell through to
   the raw API string.
+- DashScreen's End stream button now also transitions the YouTube
+  broadcast to `complete` after stopping OBS — previously it only
+  stopped OBS, which left the broadcast in `live` on YouTube's side
+  until the ingest timeout fired (~minutes later) and forced YouTube
+  to auto-end it. App.tsx lifts the live broadcast out of
+  LaunchStatusScreen via a stable `onBroadcastLive` callback (fired
+  from the `complete` event so we only surface the actually-live
+  broadcast), keeps it in app state, and hands `broadcastId` to
+  DashScreen. The new prop / callback in LaunchStatusScreen is
+  captured via a ref (same defense as `settingsRef`) so it can never
+  re-fire the launch-firing useEffect. OBS-stop failure aborts before
+  calling YouTube; YouTube-transition failure surfaces a retry-friendly
+  message without reversing the OBS stop.
 
 ### Documentation
 - Added `docs/electron-ipc.md` — complete IPC channel registry and security model.

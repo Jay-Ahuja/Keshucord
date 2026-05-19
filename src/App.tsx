@@ -9,7 +9,7 @@ import LaunchStatusScreen from './screens/LaunchStatusScreen';
 import LoginScreen from './screens/LoginScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import { youtubeService } from './services';
-import type { Screen, StreamSettings, UserSettings, YouTubeUser } from './types';
+import type { Screen, StreamSettings, UserSettings, YouTubeBroadcast, YouTubeUser } from './types';
 import { DEFAULT_USER_SETTINGS } from './types/settings';
 import { applyAccent } from './utils/applyAccent';
 import { formatDuration } from './utils/format';
@@ -37,6 +37,7 @@ export default function App() {
   const [authBootstrapping, setAuthBootstrapping] = useState(true);
   const [screen, setScreen] = useState<Screen>('login');
   const [user, setUser] = useState<YouTubeUser | null>(null);
+  const [activeBroadcast, setActiveBroadcast] = useState<YouTubeBroadcast | null>(null);
 
   // Controlled form state for the launch flow. Lives at the app level so it
   // survives navigation to other screens without losing in-progress edits.
@@ -104,9 +105,23 @@ export default function App() {
       // local state resets regardless
     }
     setUser(null);
+    setActiveBroadcast(null);
     setStreamSettings(toStreamSettings(userSettings));
     setScreen('login');
   }, [userSettings]);
+
+  // Stable identity is critical here: LaunchStatusScreen's launch-firing
+  // useEffect must never re-fire because a new callback identity slipped in.
+  // `setActiveBroadcast` is stable from useState, so empty deps are safe.
+  const handleBroadcastLive = useCallback((b: YouTubeBroadcast) => {
+    setActiveBroadcast(b);
+  }, []);
+
+  // Stable identity for DashScreen's onEnded — same reasoning. Clearing the
+  // broadcast here also lets the user start a new launch cleanly.
+  const handleBroadcastEnded = useCallback(() => {
+    setActiveBroadcast(null);
+  }, []);
 
   // ---- keyboard shortcuts ----
 
@@ -230,7 +245,12 @@ export default function App() {
       );
     }
     if (screen === 'dash') {
-      return <DashScreen />;
+      return (
+        <DashScreen
+          broadcastId={activeBroadcast?.id ?? null}
+          onEnded={handleBroadcastEnded}
+        />
+      );
     }
     if (screen === 'history') {
       return (
@@ -268,6 +288,7 @@ export default function App() {
           user={user}
           onBack={() => setScreen('create')}
           onOpenDashboard={() => setScreen('dash')}
+          onBroadcastLive={handleBroadcastLive}
         />
       );
     }
