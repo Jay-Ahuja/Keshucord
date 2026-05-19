@@ -22,6 +22,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `probe()`, `launchAndWait()`, `ObsLaunchError`.
 
 ### Fixed
+- LoginScreen now shows a Cancel button while waiting for the OAuth
+  browser consent. Clicking Cancel — or letting the 5-minute timeout
+  fire after closing the browser tab — silently returns the UI to the
+  initial sign-in state. Previously, the only way out of "Waiting for
+  browser…" was to wait 5 minutes for a generic error banner to appear,
+  or restart the app. Detects the typed `AuthCancelledError` from
+  electron/auth via `err.name` (with a message-prefix fallback for
+  cross-IPC reliability).
 - Defense-in-depth hardening (audit M1, H9). Added a strict
   Content-Security-Policy <meta> to index.html — script-src 'self', no
   eval, connect-src locked to localhost (OBS WS + Vite HMR), object-src
