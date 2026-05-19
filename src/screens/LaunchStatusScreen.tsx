@@ -84,7 +84,17 @@ export default function LaunchStatusScreen({
   // non-stable callback, we read it via a ref so the launch-firing useEffect
   // below keeps its `[]` deps and never re-fires mid-flight.
   const onBroadcastLiveRef = useRef(onBroadcastLive);
+  // React StrictMode runs mount effects twice in dev: effect → cleanup →
+  // effect. Without this guard the second mount kicks off a fresh
+  // runLaunchSequence call that the launch mutex then aborts-and-replaces,
+  // which still creates a second YouTube broadcast that is immediately
+  // deleted. The mutex handles it correctly, but burning a broadcast +
+  // delete per dev mount adds up across hot-reloads. In production
+  // StrictMode is stripped and this guard is a no-op.
+  const hasFiredRef = useRef(false);
   useEffect(() => {
+    if (hasFiredRef.current) return;
+    hasFiredRef.current = true;
     const controller = new AbortController();
     runLaunchSequence({
       settings: settingsRef.current,

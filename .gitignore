@@ -3,6 +3,8 @@ dist/
 dist-electron/
 out/
 release/
+coverage/
+dist-builder/
 .DS_Store
 *.log
 .vite/
@@ -11,3 +13,4 @@ release/
 .env
 .env.local
 .env.*.local
+.claude/

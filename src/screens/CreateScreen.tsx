@@ -131,16 +131,16 @@ export default function CreateScreen({ user, value, onChange, onSubmit }: Props)
   const [probing, setProbing] = useState(false);
   const [obsDialogOpen, setObsDialogOpen] = useState(false);
 
-  // Submit gating. We intentionally do NOT gate on a missing OBS password
-  // here: if OBS isn't running, the launch-OBS dialog needs to be the first
-  // thing the user sees, and asking them to set a password before they've
-  // even opened OBS is putting the cart before the horse. The launch
-  // orchestrator still validates the password as step 1 of the sequence
-  // (src/services/launchService.ts), so missing-password is caught — just
-  // after OBS is up. The pre-flight side panel below still surfaces the
-  // missing-password state informationally.
+  // Submit gating. Missing OBS password is now gated here — `validateSettings`
+  // (step 1 of the orchestrator) rejects an empty password, so without this
+  // gate the user pays a screen transition + 250ms validate sleep + bounce
+  // back to Create for a config we already know is bad. The pre-flight side
+  // panel below already surfaces "OBS WebSocket password: not set"; this
+  // wires the same signal into the button.
   const blockReason: string | null = !titleValid
     ? 'Add a title to continue.'
+    : !passwordSet
+    ? 'Set your OBS WebSocket password in Settings before launching.'
     : isStreaming
     ? 'OBS is already streaming — stop it before launching a managed broadcast.'
     : schedule === 'later'
