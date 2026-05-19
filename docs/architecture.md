@@ -100,6 +100,17 @@ Key security boundaries:
 - The OBS WebSocket runs in the renderer because (a) `obs-websocket-js` is a
   browser-compatible library, (b) it's a pure local loopback connection, (c)
   the data isn't sensitive at the same level as OAuth tokens.
+- A strict CSP `<meta>` in `index.html` is the renderer's last line of defense
+  against XSS / credential exfil. `script-src 'self'` (no inline, no eval),
+  `connect-src` is narrowed to `'self'` + the OBS WebSocket (`ws://localhost:4455`)
+  + Vite HMR (dev-only `ws://localhost:5173`), and Google API origins are
+  deliberately **absent** because all YouTube/OAuth fetches go through main
+  via Node `fetch`, never the renderer. `frame-src` allows
+  `youtube-nocookie.com` + `youtube.com` for DashScreen's live preview iframe;
+  `frame-ancestors` is intentionally omitted because the directive is ignored
+  when delivered via `<meta>` (Chromium warns about it) and is moot for
+  Electron — the renderer is always loaded directly into a BrowserWindow,
+  never as an iframe in another origin.
 
 ## 4. Folder structure
 
