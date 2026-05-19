@@ -168,6 +168,62 @@ export interface AuthUser {
   channelThumbnailUrl?: string;
 }
 
+/**
+ * Shape of an OAuth 2.0 error response body per RFC 6749 §5.2. Google's
+ * `/token` endpoint returns this on every non-2xx response we've seen,
+ * but we defensively tolerate missing/malformed bodies.
+ */
+interface TokenEndpointErrorBody {
+  error?: string;
+  error_description?: string;
+}
+
+const TOKEN_ERROR_DESCRIPTION_MAX_LEN = 200;
+
+/**
+ * Parses a non-2xx Response from Google's `/token` endpoint into a
+ * curated `{error, error_description}` view. Failures (malformed JSON,
+ * unexpected shape, network error mid-read) return an empty object —
+ * the caller always builds a message that includes the HTTP status, so
+ * an empty parse still produces an actionable error.
+ *
+ * Never throws.
+ */
+async function parseTokenEndpointError(res: Response): Promise<TokenEndpointErrorBody> {
+  try {
+    const body = (await res.json()) as unknown;
+    if (body && typeof body === 'object') {
+      const obj = body as Record<string, unknown>;
+      const out: TokenEndpointErrorBody = {};
+      if (typeof obj.error === 'string') out.error = obj.error;
+      if (typeof obj.error_description === 'string') out.error_description = obj.error_description;
+      return out;
+    }
+  } catch {
+    // malformed / non-JSON body — fall through to empty
+  }
+  return {};
+}
+
+/**
+ * Builds the user-facing message for a token-endpoint failure. Truncates
+ * `error_description` so a runaway server-side string never bloats logs
+ * or pushes other context off-screen in the renderer's error banner.
+ */
+function buildTokenEndpointErrorMessage(
+  status: number,
+  parsed: TokenEndpointErrorBody,
+): string {
+  const code = parsed.error ?? '<no error code>';
+  const desc = parsed.error_description ?? '';
+  const truncatedDesc =
+    desc.length > TOKEN_ERROR_DESCRIPTION_MAX_LEN
+      ? `${desc.slice(0, TOKEN_ERROR_DESCRIPTION_MAX_LEN)}…`
+      : desc;
+  const tail = truncatedDesc ? `: ${truncatedDesc}` : '';
+  return `Token exchange failed (${status} ${code})${tail}`;
+}
+
 interface GoogleTokenResponse {
   access_token: string;
   refresh_token?: string;
@@ -260,8 +316,25 @@ function startLoopback(expectedState: string): Promise<LoopbackHandle> {
       codeResolve = res;
       codeReject = rej;
     });
+    // Set by the listen callback below once the OS assigns a port. The
+    // request handler rejects any request whose Host header doesn't match
+    // exactly — see the Host-header check inside the handler.
+    let expectedHost: string | null = null;
 
     const server = http.createServer((req, res) => {
+      // Host-header validation. The only legitimate caller of this server
+      // is Google's OAuth redirect → the user's browser → 127.0.0.1:<port>.
+      // Reject anything else (missing Host, `localhost:<port>`, IPv6
+      // aliases, attacker-rebound DNS pointing at our port) so a malicious
+      // local page can't replay the callback URL to scrape a one-shot
+      // code. The `state` param remains the real defense — this is
+      // defense-in-depth.
+      const host = req.headers.host;
+      if (expectedHost && host !== expectedHost) {
+        res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('Bad request: unexpected Host header.');
+        return;
+      }
       if (!req.url) {
         res.writeHead(400).end();
         return;
@@ -347,6 +420,10 @@ function startLoopback(expectedState: string): Promise<LoopbackHandle> {
         rejectSetup(new Error('Could not start loopback HTTP server.'));
         return;
       }
+      // Lock the Host-header check to the exact bound address. The handler
+      // was already installed when the server was created; populating this
+      // closure variable now lets it start enforcing.
+      expectedHost = `127.0.0.1:${address.port}`;
       // Register the abort handle once the server is listening. cancelSignIn()
       // calls this to trigger an in-progress rejection from the renderer side;
       // it is a no-op if the loopback has already settled (the `settled` guard
@@ -622,10 +699,20 @@ export async function signOut(): Promise<void> {
   // follows runs unconditionally. tokens.enc is a single encrypted blob
   // containing access token + refresh token + cached profile, so unlinking
   // it removes all four in one operation.
+  //
+  // We revoke BOTH the refresh token AND the access token. Per Google's
+  // documentation, revoking either revokes the entire grant — but if one
+  // revoke fetch silently fails (network blip, revoke endpoint 5xx, hosts
+  // file blocking oauth2.googleapis.com), revoking the other gives the
+  // user a second chance at a clean teardown. This mirrors the partial-
+  // scope failure path in signInImpl which also revokes both.
   const stored = await tokenStore.load();
   if (stored?.refreshToken) {
     log(`signOut: revoking refresh token for "${stored.user.email}"`);
     await bestEffortRevoke(stored.refreshToken);
+  }
+  if (stored?.accessToken) {
+    await bestEffortRevoke(stored.accessToken);
   }
   await tokenStore.clear();
   log('signOut: local token state cleared');
@@ -651,8 +738,17 @@ async function exchangeCode(args: {
     }),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Token exchange failed (${res.status}): ${text}`);
+    // Surface a curated `{status, error, error_description}` message rather
+    // than the raw HTTP body. Google's token endpoint is documented to
+    // return only `{error, error_description}` in cleartext on failure, but
+    // the error propagates through IPC to the renderer's error banner and
+    // into log captures — we want defense-in-depth against the response
+    // shape ever changing (or a misconfigured proxy/middleware injecting
+    // attacker-influenceable content) leaking the raw body to the user.
+    // `error_description` is bounded to 200 chars; longer strings are
+    // truncated with an ellipsis.
+    const parsed = await parseTokenEndpointError(res);
+    throw new Error(buildTokenEndpointErrorMessage(res.status, parsed));
   }
   const tokens = (await res.json()) as GoogleTokenResponse;
   // Google's token endpoint is documented to always return `token_type: "Bearer"`.
@@ -667,78 +763,162 @@ async function exchangeCode(args: {
   return tokens;
 }
 
-async function refresh(stored: tokenStore.StoredTokens): Promise<tokenStore.StoredTokens | null> {
-  const { clientId, clientSecret } = config();
-  const res = await fetchWithTimeout(TOKEN_ENDPOINT, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      refresh_token: stored.refreshToken,
-      grant_type: 'refresh_token',
-    }),
-  });
+/**
+ * Classifier shared by `refresh()` and its tests: returns true iff the
+ * `{status, errorCode}` pair from Google's `/token` endpoint represents
+ * a genuine, terminal authentication failure (refresh_token is gone /
+ * never valid / request was malformed in a way Google won't retry).
+ *
+ * Per RFC 6749 §5.2 the *auth-failure* error codes are `invalid_grant`,
+ * `invalid_token`, `invalid_request`. Everything else (network blip,
+ * 5xx, 429 rate limit, generic 4xx without an OAuth error code,
+ * malformed body) is transient and recoverable — we throw so the
+ * caller's retry logic can react, and the cached tokens stay intact.
+ *
+ * Audit reference: H3 ("silent sign-out on transient refresh failure").
+ */
+export function isAuthClassTokenFailure(
+  status: number,
+  errorCode: string | undefined,
+): boolean {
+  return (
+    status >= 400 &&
+    status < 500 &&
+    (errorCode === 'invalid_grant' ||
+      errorCode === 'invalid_token' ||
+      errorCode === 'invalid_request')
+  );
+}
+
+// Retry tuning for the refresh-token POST. Auth-class 4xx returns null
+// immediately (no retry). Other failures are retried — Google's token
+// endpoint can occasionally 502 during incidents, 429 under burst load,
+// or drop the connection mid-handshake during ISP/DNS transitions. The
+// retry budget is bounded at 3 attempts so a sustained outage surfaces
+// quickly rather than silently extending session lifetime indefinitely.
+const REFRESH_RETRY_ATTEMPTS = 3;
+const REFRESH_RETRY_BASE_DELAY_MS = 200;
+
+interface RefreshAttemptResult {
+  // Set on auth-class 4xx — caller clears tokens, returns null.
+  terminal?: { status: number; errorCode: string };
+  // Set on transient failure — caller retries (or throws if budget exhausted).
+  transient?: { message: string; status?: number; errorCode?: string };
+  // Set on success — caller proceeds with the parsed body.
+  data?: Omit<GoogleTokenResponse, 'refresh_token'> & { refresh_token?: string };
+}
+
+async function refreshAttempt(
+  clientId: string,
+  clientSecret: string,
+  refreshToken: string,
+): Promise<RefreshAttemptResult> {
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(TOKEN_ENDPOINT, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }),
+    });
+  } catch (err) {
+    // Network failure / DNS / timeout — transient.
+    return {
+      transient: {
+        message: err instanceof Error ? err.message : String(err),
+      },
+    };
+  }
   if (!res.ok) {
-    // === Why we no longer blanket-clear on every !res.ok ============================
-    // The previous implementation unconditionally called tokenStore.clear() on any
-    // non-2xx response, which made a transient hiccup (502 from Google, a 429 burst,
-    // a corporate proxy returning 503, a 5xx during a Google incident, or a 4xx
-    // without an auth-class reason) look identical to a real "your refresh token is
-    // gone" event. The result: a user who was happily signed in would mysteriously
-    // get bounced to the login screen, lose their in-progress launch, and have to
-    // redo the whole consent flow — for nothing.
-    //
-    // The OAuth 2.0 RFC (6749 §5.2) lists the *auth-failure* error codes that
-    // truly mean "this refresh_token will never work again": `invalid_grant`,
-    // `invalid_token`, `invalid_request`. Everything else (network blip, server
-    // error, rate limit, malformed body we can't parse) is recoverable — we throw
-    // so the caller's retry logic / outer error boundary can react, and we leave
-    // the cached tokens intact so the next attempt has something to refresh.
-    //
-    // Audit reference: H3 ("silent sign-out on transient refresh failure").
-    // ================================================================================
     let errorCode: string | undefined;
     try {
-      // Cloning so subsequent .text() / debugging is still possible if needed.
       const body = (await res.json()) as { error?: string; error_description?: string };
       errorCode = typeof body?.error === 'string' ? body.error : undefined;
     } catch {
-      // Malformed / non-JSON body from Google — extremely rare, but if it
-      // happens we deliberately fall through to the "non-auth-class" branch.
-      // It would be unsafe to assume "invalid_grant" without evidence.
+      // Malformed / non-JSON body — fall through to the non-auth-class branch.
       errorCode = undefined;
     }
+    if (isAuthClassTokenFailure(res.status, errorCode)) {
+      return { terminal: { status: res.status, errorCode: errorCode! } };
+    }
+    return {
+      transient: {
+        message: `Google token endpoint returned ${res.status}${
+          errorCode ? ` (${errorCode})` : ''
+        }`,
+        status: res.status,
+        errorCode,
+      },
+    };
+  }
+  let data: Omit<GoogleTokenResponse, 'refresh_token'> & { refresh_token?: string };
+  try {
+    data = (await res.json()) as Omit<GoogleTokenResponse, 'refresh_token'> & {
+      refresh_token?: string;
+    };
+  } catch (err) {
+    return {
+      transient: {
+        message: `Malformed token-endpoint response: ${err instanceof Error ? err.message : String(err)}`,
+      },
+    };
+  }
+  return { data };
+}
 
-    const isAuthClass4xx =
-      res.status >= 400 &&
-      res.status < 500 &&
-      (errorCode === 'invalid_grant' ||
-        errorCode === 'invalid_token' ||
-        errorCode === 'invalid_request');
+async function refresh(stored: tokenStore.StoredTokens): Promise<tokenStore.StoredTokens | null> {
+  const { clientId, clientSecret } = config();
 
-    if (isAuthClass4xx) {
+  // Single-flight (pendingRefresh in getAccessToken) wraps this whole loop,
+  // so the retry runs once per coalesced caller-group — every queued caller
+  // benefits from whichever attempt finally succeeds.
+  let lastTransient: { message: string; status?: number; errorCode?: string } | null = null;
+  let data: (Omit<GoogleTokenResponse, 'refresh_token'> & { refresh_token?: string }) | null = null;
+
+  for (let attempt = 1; attempt <= REFRESH_RETRY_ATTEMPTS; attempt++) {
+    const result = await refreshAttempt(clientId, clientSecret, stored.refreshToken);
+    if (result.terminal) {
       log(
-        `refresh: token endpoint returned ${res.status} ${errorCode} — clearing local state (genuine auth failure)`,
+        `refresh: token endpoint returned ${result.terminal.status} ${result.terminal.errorCode} — clearing local state (genuine auth failure, no retry)`,
       );
       await tokenStore.clear();
       return null;
     }
-
+    if (result.data) {
+      data = result.data;
+      if (attempt > 1) {
+        log(`refresh: succeeded on attempt ${attempt}/${REFRESH_RETRY_ATTEMPTS}`);
+      }
+      break;
+    }
+    lastTransient = result.transient!;
     log(
-      `refresh: token endpoint returned ${res.status}${
-        errorCode ? ` (error="${errorCode}")` : ''
-      } — treating as transient, preserving cached tokens`,
+      `refresh: attempt ${attempt}/${REFRESH_RETRY_ATTEMPTS} failed transiently — ${lastTransient.message}`,
+    );
+    if (attempt < REFRESH_RETRY_ATTEMPTS) {
+      // 200ms → 400ms → 800ms with ±25 % jitter.
+      const baseDelay = REFRESH_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+      const jitter = baseDelay * 0.25 * (Math.random() * 2 - 1);
+      const delay = Math.max(50, Math.round(baseDelay + jitter));
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+
+  if (!data) {
+    const { message, status, errorCode } = lastTransient!;
+    log(
+      `refresh: all ${REFRESH_RETRY_ATTEMPTS} attempts failed — preserving cached tokens, surfacing transient error`,
     );
     throw new Error(
-      `Google token endpoint returned ${res.status}${
-        errorCode ? ` (${errorCode})` : ''
-      } — refresh failed transiently. Cached tokens kept; retry later.`,
+      `Google token endpoint refresh failed transiently after ${REFRESH_RETRY_ATTEMPTS} attempts${
+        status ? ` (last status ${status}${errorCode ? ` ${errorCode}` : ''})` : ''
+      }: ${message}. Cached tokens kept; retry later.`,
     );
   }
-  const data = (await res.json()) as Omit<GoogleTokenResponse, 'refresh_token'> & {
-    refresh_token?: string;
-  };
   // Same defensive token_type assertion as exchangeCode — if Google's refresh
   // response ever stops being a Bearer token, fail loudly instead of silently
   // mis-using whatever we got back.
