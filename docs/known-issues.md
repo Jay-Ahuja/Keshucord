@@ -240,9 +240,19 @@ clean up from YouTube Studio.
 
 ### No subscriber / viewer count [stub]
 
-DashScreen's preview overlay has placeholder slots for live viewer count
-and subscriber count. Neither `channels.list?part=statistics` nor
-`videos.list?part=liveStreamingDetails` is fetched.
+DashScreen's preview area embeds the live YouTube broadcast directly via a
+nocookie iframe (visible viewer count comes from YouTube's player chrome),
+but the surrounding app chrome has no first-class viewer / subscriber count
+display. Neither `channels.list?part=statistics` nor
+`videos.list?part=liveStreamingDetails` is fetched, so any app-level
+"X watching now" chip would need that plumbing added first.
+
+Also note: the YouTube embed only loads when the broadcast is **public** or
+**unlisted**. Private broadcasts surface "Video unavailable" inside the
+iframe — this is a YouTube constraint (the public `/embed/{id}` URL is
+unauthenticated by design), not a bug in Keshucord. Users who need a real
+preview for private streams must either switch the broadcast to unlisted
+or wait for a local OBS-screenshot preview path to be built.
 
 ### `monitorStream` not supported [limitation]
 

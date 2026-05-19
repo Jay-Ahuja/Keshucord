@@ -100,6 +100,7 @@ export default function DashScreen({ broadcastId, onEnded }: Props) {
   const bitrateHistory = useBitrateHistory();
   const [endStreamBusy, setEndStreamBusy] = useState(false);
   const [endStreamError, setEndStreamError] = useState<string | null>(null);
+  const [previewLoaded, setPreviewLoaded] = useState(false);
 
   const isStreaming = obsStatus.state === 'streaming';
   const liveDuration = isStreaming && health?.outputDurationMs
@@ -124,6 +125,7 @@ export default function DashScreen({ broadcastId, onEnded }: Props) {
   // (a new launch is starting; the prior error is no longer relevant).
   useEffect(() => {
     if (!broadcastId) setEndStreamError(null);
+    setPreviewLoaded(false);
   }, [broadcastId]);
 
   const handleEndStream = async () => {
@@ -253,7 +255,25 @@ export default function DashScreen({ broadcastId, onEnded }: Props) {
         {/* LEFT — preview + chart */}
         <div className="col" style={{ gap: 18 }}>
           <div className="preview-large">
-            <div className="grid-bg" />
+            {broadcastId ? (
+              <iframe
+                key={broadcastId}
+                src={`https://www.youtube-nocookie.com/embed/${broadcastId}?autoplay=1&mute=1`}
+                title="YouTube live stream preview"
+                allow="autoplay; encrypted-media; picture-in-picture"
+                allowFullScreen
+                onLoad={() => setPreviewLoaded(true)}
+                style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', border: 0 }}
+              />
+            ) : (
+              <div className="grid-bg" />
+            )}
+            {broadcastId && !previewLoaded && (
+              <>
+                <div className="grid-bg" />
+                <div className="ph-label">loading preview…</div>
+              </>
+            )}
             {isStreaming && (
               <>
                 <div className="live-tag">
@@ -262,13 +282,9 @@ export default function DashScreen({ broadcastId, onEnded }: Props) {
                 <div className="duration">{liveDuration}</div>
               </>
             )}
-            <div className="ph-label">
-              {isStreaming
-                ? `stream preview · ingest mirror${
-                    obsStatus.currentScene ? ` · ${obsStatus.currentScene}` : ''
-                  }`
-                : 'not currently streaming — launch from new stream'}
-            </div>
+            {!broadcastId && (
+              <div className="ph-label">not currently streaming — launch from new stream</div>
+            )}
           </div>
 
           <div className="card padL">
