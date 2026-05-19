@@ -290,6 +290,32 @@ export async function transitionToLive(broadcastId: string): Promise<YouTubeBroa
   });
 }
 
+export async function transitionToComplete(broadcastId: string): Promise<void> {
+  return withOperationAbort(async (signal) => {
+    log(`transitionToComplete: broadcast=${broadcastId}`);
+    const url = new URL(`${API_BASE}/liveBroadcasts/transition`);
+    url.searchParams.set('part', 'id,status');
+    url.searchParams.set('broadcastStatus', 'complete');
+    url.searchParams.set('id', broadcastId);
+
+    // transition is idempotent at the application layer (YouTube returns
+    // `redundantTransition` if already in the requested state — i.e. a user
+    // double-clicking End Stream). Retry-on-503 is safe; we surface
+    // redundantTransition via explainError if it leaks through.
+    const data = await call<{
+      id: string;
+      status?: { lifeCycleStatus?: string };
+    }>(url.toString(), { method: 'POST', idempotent: true, signal });
+
+    if (!data.id) {
+      throw new Error('YouTube returned no broadcast id from liveBroadcasts.transition.');
+    }
+    log(
+      `transitionToComplete → broadcast=${data.id} lifeCycleStatus=${data.status?.lifeCycleStatus ?? '<unknown>'}`,
+    );
+  });
+}
+
 // ---- liveBroadcasts.delete / liveStreams.delete ----
 
 export async function deleteBroadcast(broadcastId: string): Promise<void> {

@@ -24,6 +24,7 @@ export interface KeshucordAPI {
     getStreamIngestionInfo(streamId: string): Promise<StreamIngestionInfo>;
     getStreamStatus(streamId: string): Promise<string>;
     transitionToLive(broadcastId: string): Promise<YouTubeBroadcast>;
+    transitionToComplete(broadcastId: string): Promise<void>;
     deleteBroadcast(broadcastId: string): Promise<void>;
     deleteLiveStream(streamId: string): Promise<void>;
     /** Aborts every in-flight YouTube request currently running in main. */

@@ -36,6 +36,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('youtube:transition-live', (_e, broadcastId: string) =>
     youtube.transitionToLive(broadcastId),
   );
+  ipcMain.handle('youtube:transition-complete', (_e, broadcastId: string) =>
+    youtube.transitionToComplete(broadcastId),
+  );
   ipcMain.handle('youtube:delete-broadcast', (_e, broadcastId: string) =>
     youtube.deleteBroadcast(broadcastId),
   );

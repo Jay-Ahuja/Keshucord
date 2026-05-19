@@ -67,6 +67,7 @@ directly — only the `window.keshucord` object exposed by the preload.
 | `youtube:get-ingestion` | `window.keshucord.youtube.getStreamIngestionInfo(streamId)` | `youtube.getStreamIngestionInfo(streamId)` | `StreamIngestionInfoPayload` |
 | `youtube:get-stream-status` | `window.keshucord.youtube.getStreamStatus(streamId)` | `youtube.getStreamStatus(streamId)` | `string` |
 | `youtube:transition-live` | `window.keshucord.youtube.transitionToLive(broadcastId)` | `youtube.transitionToLive(broadcastId)` | `YouTubeBroadcastPayload` |
+| `youtube:transition-complete` | `window.keshucord.youtube.transitionToComplete(broadcastId)` | `youtube.transitionToComplete(broadcastId)` | `void` |
 | `youtube:delete-broadcast` | `window.keshucord.youtube.deleteBroadcast(broadcastId)` | `youtube.deleteBroadcast(broadcastId)` | `void` |
 | `youtube:delete-stream` | `window.keshucord.youtube.deleteLiveStream(streamId)` | `youtube.deleteLiveStream(streamId)` | `void` |
 | `youtube:cancel` | `window.keshucord.youtube.cancel()` | `youtube.cancelAllInFlight()` | `void` |
@@ -103,7 +104,7 @@ we spawn it?
   spawn returns as soon as the OS hand-off succeeds; reachability is
   the renderer's responsibility (see `obsService.launchAndWait`).
 
-**Total: 17 channels.** 3 auth + 3 settings + 9 YouTube + 2 OBS.
+**Total: 18 channels.** 3 auth + 3 settings + 10 YouTube + 2 OBS.
 
 ## 3. Payload types
 
@@ -296,7 +297,7 @@ app.whenReady().then(() => {
 |---|---|
 | `auth` | `sign-in`, `sign-out`, `get-current-user` |
 | `settings` | `load`, `save`, `reset` |
-| `youtube` | `create-broadcast`, `create-stream`, `bind`, `get-ingestion`, `get-stream-status`, `transition-live`, `delete-broadcast`, `delete-stream`, `cancel` |
+| `youtube` | `create-broadcast`, `create-stream`, `bind`, `get-ingestion`, `get-stream-status`, `transition-live`, `transition-complete`, `delete-broadcast`, `delete-stream`, `cancel` |
 | `obs` | `is-running`, `launch` |
 
 When adding a new channel:

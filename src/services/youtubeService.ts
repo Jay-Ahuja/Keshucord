@@ -130,6 +130,10 @@ export async function transitionToLive(broadcast: YouTubeBroadcast): Promise<You
   };
 }
 
+export async function transitionToComplete(broadcastId: string): Promise<void> {
+  await window.keshucord.youtube.transitionToComplete(broadcastId);
+}
+
 // --- helpers ---
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

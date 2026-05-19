@@ -88,6 +88,8 @@ const api = {
       ipcRenderer.invoke('youtube:get-stream-status', streamId),
     transitionToLive: (broadcastId: string): Promise<YouTubeBroadcastPayload> =>
       ipcRenderer.invoke('youtube:transition-live', broadcastId),
+    transitionToComplete: (broadcastId: string): Promise<void> =>
+      ipcRenderer.invoke('youtube:transition-complete', broadcastId),
     deleteBroadcast: (broadcastId: string): Promise<void> =>
       ipcRenderer.invoke('youtube:delete-broadcast', broadcastId),
     deleteLiveStream: (streamId: string): Promise<void> =>
