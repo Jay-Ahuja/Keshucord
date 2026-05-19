@@ -1,6 +1,24 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <!--
+      Content-Security-Policy: defense-in-depth against XSS / credential exfil.
+      - default-src 'self': baseline restrictive.
+      - script-src 'self': all JS comes from the bundle; no inline / no eval.
+      - style-src includes 'unsafe-inline' because Vite injects styles via inline
+        <style> tags during dev, and the Tailwind preflight pulls inline rules too.
+        Removing 'unsafe-inline' breaks the app's styling system — DO NOT.
+      - font-src + style-src include fonts.googleapis.com / fonts.gstatic.com for Geist.
+      - connect-src ws://localhost:4455: OBS WebSocket (mandatory).
+      - connect-src ws://localhost:5173: Vite HMR (dev-only, harmless in production).
+      - Google API origins are NOT in connect-src — all YouTube/OAuth fetches happen
+        in the main process via Node fetch, not the renderer.
+      - object-src 'none', frame-ancestors 'none', base-uri 'self': lockdown extras.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws://localhost:4455 ws://localhost:5173; img-src 'self' data: https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    />
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Keshucord</title>
