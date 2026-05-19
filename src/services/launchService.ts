@@ -70,6 +70,30 @@ function maskKey(key: string): string {
 let activeLaunch: Promise<YouTubeBroadcast> | null = null;
 let activeAbort: AbortController | null = null;
 
+/**
+ * Aborts the currently-active launch sequence (if any). Used by App's
+ * `handleSignOut` to ensure cleanup runs with valid auth tokens BEFORE
+ * sign-out clears them (audit H6).
+ *
+ * This is NOT for per-step aborts within a launch — pass an `AbortSignal`
+ * into `runLaunchSequence` for that. This helper exists solely for the
+ * App-level sign-out drain.
+ */
+export function abortActiveLaunch(): void {
+  activeAbort?.abort();
+}
+
+/**
+ * Returns a promise that resolves when the currently-active launch (if any)
+ * has fully settled, including its cleanup branch. Resolves to
+ * `Promise<unknown>` because callers don't care about the result here — we
+ * only care about completion. Used by `handleSignOut` together with
+ * `abortActiveLaunch()` to wait out the cleanup before clearing tokens.
+ */
+export function awaitActiveLaunchSettled(): Promise<unknown> {
+  return activeLaunch ?? Promise.resolve();
+}
+
 export async function runLaunchSequence(opts: RunLaunchOptions): Promise<YouTubeBroadcast> {
   log('runLaunchSequence requested');
 
@@ -110,7 +134,10 @@ export async function runLaunchSequence(opts: RunLaunchOptions): Promise<YouTube
   let myPromise!: Promise<YouTubeBroadcast>;
   myPromise = (async () => {
     try {
-      return await _runLaunchSequence({ ...opts, signal: mergedController.signal });
+      return await _runLaunchSequence(
+        { ...opts, signal: mergedController.signal },
+        { propagate, callerSignal: opts.signal, internalSignal: myAbort.signal },
+      );
     } finally {
       // Only clear the module slots if they still point to us — a newer launch
       // may have replaced us, in which case we leave its bookkeeping alone.
@@ -124,11 +151,18 @@ export async function runLaunchSequence(opts: RunLaunchOptions): Promise<YouTube
   return myPromise;
 }
 
-async function _runLaunchSequence({
-  settings,
-  onEvent,
-  signal,
-}: RunLaunchOptions): Promise<YouTubeBroadcast> {
+// Internal handle for `_runLaunchSequence` so its catch block can detach the
+// propagate listener before running cleanup. See H7 below.
+interface InternalLaunchHandle {
+  propagate: () => void;
+  callerSignal: AbortSignal | undefined;
+  internalSignal: AbortSignal;
+}
+
+async function _runLaunchSequence(
+  { settings, onEvent, signal }: RunLaunchOptions,
+  handle: InternalLaunchHandle,
+): Promise<YouTubeBroadcast> {
   const run = async <T>(stepId: LaunchStepId, work: () => Promise<T>): Promise<T> => {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const startedAt = Date.now();
@@ -236,8 +270,17 @@ async function _runLaunchSequence({
         rtmpUrl: ingestion.rtmpUrl,
         streamKey: ingestion.streamKey,
       });
-      const result = await obs.startStreaming();
+      // H3: mark BEFORE the StartStream call so a verify-loop timeout still
+      // routes through the cleanup branch's 'streaming' rollback. Without
+      // this, if obs.startStreaming() rejects after OBS has already begun
+      // pushing RTMP (e.g. our 5s outputActive poll times out but the actual
+      // encoder is running), obsProgress stays 'configured' and cleanup
+      // doesn't call stopStreaming — OBS keeps streaming to a deleted
+      // broadcast endpoint. obs.startStreaming is internally bounded and
+      // obs.stopStreaming is a no-op when state !== 'streaming', so marking
+      // optimistically is safe.
       obsProgress = 'streaming';
+      const result = await obs.startStreaming();
       return result;
     });
 
@@ -272,6 +315,15 @@ async function _runLaunchSequence({
     onEvent({ type: 'complete', broadcast: liveBroadcast });
     return liveBroadcast;
   } catch (err) {
+    // H7: detach the propagate listener before running cleanup so a
+    // user-initiated abort (which fires propagate -> youtube.cancel()) cannot
+    // cancel the cleanup branch's own youtube.deleteBroadcast /
+    // deleteLiveStream calls. Without this, a Cancel-during-cleanup fires
+    // youtube.cancel() which aborts the in-flight deletes, orphaning resources
+    // on the user's channel. The listeners were registered { once: true } but
+    // may not have fired yet — explicit removeEventListener is required.
+    handle.callerSignal?.removeEventListener('abort', handle.propagate);
+    handle.internalSignal.removeEventListener('abort', handle.propagate);
     // Clean up any orphaned YouTube resources + roll back OBS state before
     // re-throwing so the user doesn't accumulate dead broadcasts/streams from
     // failed launches or mid-launch navigation. Each YouTube delete is
@@ -335,20 +387,38 @@ async function _runLaunchSequence({
     // frozen OBS doesn't pin the user.
     const CLEANUP_TIMEOUT_MS = 5000;
     if (obsProgress === 'streaming') {
-      if (obs.getStatus().state === 'streaming') {
-        log('launch-cleanup: OBS is streaming after a failed launch — stopping it before deleting broadcast');
-        await Promise.race<unknown>([
-          obs.stopStreaming(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('stopStreaming timed out')), CLEANUP_TIMEOUT_MS),
-          ),
-        ]).catch((stopErr) =>
-          console.warn(
-            '[launch] failed to stop OBS streaming during cleanup:',
-            stopErr instanceof Error ? stopErr.message : stopErr,
-          ),
-        );
-      }
+      // H3: always attempt stopStreaming + disconnect. obsService.stopStreaming
+      // is a no-op when status.state !== 'streaming', so this is benign in the
+      // silent-StartStream case but covers the case where OBS did start but our
+      // event handler never received outputActive=true (the verify-loop timed
+      // out optimistically with obsProgress already flipped to 'streaming').
+      // Leaving OBS pushing RTMP to a tombstoned endpoint is strictly worse
+      // than a graceful stop.
+      log('launch-cleanup: obsProgress="streaming" after a failed launch — stopping and disconnecting OBS');
+      await Promise.race<unknown>([
+        obs.stopStreaming(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('stopStreaming timed out')), CLEANUP_TIMEOUT_MS),
+        ),
+      ]).catch((stopErr) =>
+        console.warn(
+          '[launch] cleanup stopStreaming:',
+          stopErr instanceof Error ? stopErr.message : stopErr,
+        ),
+      );
+      // Always follow with disconnect so OBS doesn't sit configured for a
+      // deleted broadcast.
+      await Promise.race<unknown>([
+        obs.disconnect(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('disconnect timed out')), CLEANUP_TIMEOUT_MS),
+        ),
+      ]).catch((discErr) =>
+        console.warn(
+          '[launch] cleanup disconnect:',
+          discErr instanceof Error ? discErr.message : discErr,
+        ),
+      );
     } else if (obsProgress === 'connected' || obsProgress === 'configured') {
       const obsState = obs.getStatus().state;
       if (obsState === 'connected' || obsState === 'connecting') {

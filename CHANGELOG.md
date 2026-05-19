@@ -36,6 +36,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   non-dismissible banner explaining the state. The `save()` catch path
   no longer overwrites a newer queued save's optimistic state — the
   disk-rollback only fires when the failed save was still the latest.
+- Sign-out and launch-lifecycle handoffs (audit H2/H3/H6/H7).
+  `handleSignOut` now aborts any in-flight launch and awaits its cleanup
+  before clearing tokens, so the launch's `deleteBroadcast` /
+  `deleteLiveStream` calls don't race the token wipe and orphan resources
+  on the user's YouTube channel; it also disconnects OBS so the next
+  session doesn't inherit a `streaming` state from the previous user's
+  broadcast. `launchService` now sets `obsProgress='streaming'` BEFORE
+  `obs.startStreaming()` so a verify-loop timeout still routes through the
+  cleanup branch's `stopStreaming`+`disconnect`, instead of leaving OBS
+  silently pushing RTMP to a deleted broadcast endpoint; the cleanup
+  branch's `'streaming'` arm now always attempts both even when our
+  internal state never observed the live state. The `propagate` listener
+  (which fires `youtube.cancel()` on abort) now detaches at the top of
+  the cleanup branch so a user-initiated Cancel during cleanup can't
+  abort the cleanup's own `deleteBroadcast` / `deleteLiveStream` calls.
+  Two new internal `launchService` exports — `abortActiveLaunch()` and
+  `awaitActiveLaunchSettled()` — exist solely for the App-level sign-out
+  drain, not for per-step abort use within a launch.
 - CreateScreen no longer blocks the Go Live click when the OBS WebSocket
   password isn't set — the new pre-flight dialog needs to surface
   BEFORE asking the user to set credentials for a service they haven't

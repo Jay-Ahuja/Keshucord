@@ -8,7 +8,7 @@ import DashScreen from './screens/DashScreen';
 import LaunchStatusScreen from './screens/LaunchStatusScreen';
 import LoginScreen from './screens/LoginScreen';
 import SettingsScreen from './screens/SettingsScreen';
-import { youtubeService } from './services';
+import { abortActiveLaunch, awaitActiveLaunchSettled, obsService, youtubeService } from './services';
 import type { Screen, StreamSettings, UserSettings, YouTubeBroadcast, YouTubeUser } from './types';
 import { DEFAULT_USER_SETTINGS } from './types/settings';
 import { applyAccent } from './utils/applyAccent';
@@ -109,6 +109,22 @@ export default function App() {
   }, [userSettings, saveUserSettings]);
 
   const handleSignOut = useCallback(async () => {
+    // H6: drain any in-flight launch BEFORE clearing auth tokens. The
+    // launch's cleanup branch calls youtube.deleteBroadcast /
+    // deleteLiveStream, which need valid tokens. Without this drain, sign-out
+    // -mid-launch racing the launch's own catch block leaves orphan resources
+    // on the user's YouTube channel.
+    abortActiveLaunch();
+    await awaitActiveLaunchSettled().catch(() => {
+      // expected — the launch was aborted
+    });
+
+    // H2: disconnect OBS so the next session doesn't inherit a 'streaming'
+    // state from this user's broadcast (the obsService instance is
+    // module-scoped and survives sign-out). Best-effort: ignore failures, OBS
+    // may be unreachable.
+    await obsService.disconnect().catch(() => undefined);
+
     try {
       await youtubeService.signOut();
     } catch {
