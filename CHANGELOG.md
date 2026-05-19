@@ -57,6 +57,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   403 rate-limit — project quota vs per-user quota), but only the
   latter was previously mapped; the per-user variant fell through to
   the raw API string.
+- Sidebar no longer surfaces a "Going Live" entry for the `launch`
+  screen — the launch screen is a transient state in the Create → Launch
+  → Dash flow, not a destination the user navigates to (clicking it
+  mid-stream would have dropped the user back into a stale orchestrator
+  view). The `'launch'` member of the `Screen` union is intentionally
+  preserved so `App.tsx`'s route guards keep working; the Sidebar's
+  `active = page === item.key` lookup safely degrades to no-match (all
+  rows render inactive) while `screen === 'launch'`. Paired with this,
+  `App.tsx`'s `handleBroadcastLive` now auto-advances to Dash on
+  successful launch by also calling `setScreen('dash')`. The transition
+  is guarded by a `screenRef.current === 'launch'` check (mirroring
+  `screen` into a ref via a small `useEffect`) so we don't yank the
+  user to Dash if they navigated away from the launch screen mid-flight.
+  The guard MUST stay — `handleBroadcastLive`'s `useCallback` deps
+  array must remain `[]` to preserve stable identity for
+  LaunchStatusScreen's launch-firing useEffect, so reading `screen`
+  directly isn't an option. Don't delete it thinking it's dead code.
 - DashScreen's End stream button now also transitions the YouTube
   broadcast to `complete` after stopping OBS — previously it only
   stopped OBS, which left the broadcast in `live` on YouTube's side

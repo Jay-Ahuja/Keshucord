@@ -3,7 +3,6 @@ import {
   HelpIcon,
   HistoryIcon,
   HomeIcon,
-  LiveIcon,
   PlusIcon,
   SettingsIcon,
 } from './Icons';
@@ -18,11 +17,14 @@ interface NavItem {
   liveAware?: boolean;
 }
 
+// 'launch' is intentionally absent: it's a transient state owned by the
+// Create → Launch → Dash flow, not a destination the user navigates to.
+// The Screen union still contains 'launch' so route guards in App.tsx keep
+// working; we just don't surface a sidebar entry for it.
 const NAV_PRIMARY: NavItem[] = [
   { key: 'home', label: 'Overview', Icon: HomeIcon, kbd: '⌘1' },
   { key: 'create', label: 'New Stream', Icon: PlusIcon, kbd: '⌘N' },
-  { key: 'launch', label: 'Going Live', Icon: LiveIcon, kbd: '⌘L', liveAware: true },
-  { key: 'dash', label: 'Stream Health', Icon: DashIcon, kbd: '⌘H' },
+  { key: 'dash', label: 'Stream Health', Icon: DashIcon, kbd: '⌘H', liveAware: true },
   { key: 'history', label: 'History', Icon: HistoryIcon },
 ];
 

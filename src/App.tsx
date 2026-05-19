@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PlaceholderScreen } from './components/PlaceholderScreen';
 import { Sidebar } from './components/Sidebar';
 import { Spinner } from './components/Spinner';
@@ -38,6 +38,16 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>('login');
   const [user, setUser] = useState<YouTubeUser | null>(null);
   const [activeBroadcast, setActiveBroadcast] = useState<YouTubeBroadcast | null>(null);
+
+  // Mirror `screen` into a ref so stable callbacks (notably `handleBroadcastLive`
+  // below) can read the current value without taking a dep on it. Keeping
+  // `handleBroadcastLive`'s deps array empty is load-bearing: a fresh identity
+  // would re-fire LaunchStatusScreen's launch-firing useEffect and restart the
+  // launch mid-flight.
+  const screenRef = useRef(screen);
+  useEffect(() => {
+    screenRef.current = screen;
+  });
 
   // Controlled form state for the launch flow. Lives at the app level so it
   // survives navigation to other screens without losing in-progress edits.
@@ -113,8 +123,18 @@ export default function App() {
   // Stable identity is critical here: LaunchStatusScreen's launch-firing
   // useEffect must never re-fire because a new callback identity slipped in.
   // `setActiveBroadcast` is stable from useState, so empty deps are safe.
+  //
+  // Auto-advance to Dash on successful launch. We read `screen` via
+  // `screenRef` (not a dep) so we don't break the stable identity contract
+  // above. The `=== 'launch'` guard prevents yanking the user to Dash if
+  // they manually navigated away mid-flight (e.g. opened Settings while
+  // waiting for the stream to go active). Do NOT add `screen` to deps —
+  // that would defeat the whole point.
   const handleBroadcastLive = useCallback((b: YouTubeBroadcast) => {
     setActiveBroadcast(b);
+    if (screenRef.current === 'launch') {
+      setScreen('dash');
+    }
   }, []);
 
   // Stable identity for DashScreen's onEnded — same reasoning. Clearing the
