@@ -32,6 +32,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   channel: `auth:cancel-sign-in`. The existing single-flight signIn
   coalesce is preserved — accidental double-clicks still de-dupe onto
   one loopback server.
+- LoginScreen pairs with the auth-cancel work above: a Cancel ghost
+  button appears below the "Waiting for browser…" copy and calls
+  `youtubeService.cancelSignIn()`. The in-flight signIn rejects with
+  `AuthCancelledError`, which the catch branch detects via `err.name`
+  (with an `AuthCancelledError:` message-prefix fallback for cross-IPC
+  reliability) and silently resets the UI — no error banner. The
+  now-unreachable timeout branch in `mapGoogleError` is removed.
 - Defense-in-depth hardening (audit M1, H9). Added a strict
   Content-Security-Policy <meta> to index.html — script-src 'self', no
   eval, connect-src locked to localhost (OBS WS + Vite HMR), object-src

@@ -33,9 +33,6 @@ function mapGoogleError(err: unknown): string {
   if (lowered.includes('redirect_uri_mismatch')) {
     return 'OAuth client misconfigured — check docs/oauth-setup.md.';
   }
-  if (lowered.includes('timed out') || lowered.includes('timeout')) {
-    return raw;
-  }
   return 'Sign-in failed. Please try again.';
 }
 
@@ -51,9 +48,37 @@ export default function LoginScreen({ onSignedIn }: Props) {
       onSignedIn(user);
       return; // parent advances the screen
     } catch (err) {
+      // AuthCancelledError covers both the 5-minute timeout and a user-
+      // initiated cancel. Closing the browser tab is intentional user
+      // behavior — show no error banner, just reset to the initial state.
+      // Cross-IPC defense: structured-clone preserves err.name reliably,
+      // and the message is prefixed `AuthCancelledError:` as a fallback.
+      const isCancelled =
+        err instanceof Error &&
+        (err.name === 'AuthCancelledError' ||
+          err.message?.startsWith('AuthCancelledError:'));
+      if (isCancelled) {
+        setError(null);
+        setBusy(false);
+        return;
+      }
       setError(mapGoogleError(err));
       setBusy(false);
     }
+  };
+
+  const handleCancel = async () => {
+    try {
+      await youtubeService.cancelSignIn();
+    } catch {
+      // best-effort — if the IPC itself fails, the 5-min timeout will eventually
+      // fire and unwind the in-flight signIn anyway.
+    }
+    // DO NOT setBusy(false) here. The in-flight signIn() will reject with
+    // AuthCancelledError, the existing handleSignIn catch will see err.name
+    // and silently reset state. Double-managing state from both sides causes
+    // a flicker where the screen briefly shows the initial state before
+    // re-showing 'Waiting for browser…' if the rejection arrives late.
   };
 
   const handleStreamKey = () => {
@@ -119,10 +144,20 @@ export default function LoginScreen({ onSignedIn }: Props) {
           </button>
 
           {busy && (
-            <div className="fineprint" style={{ color: 'var(--fg-mute)' }}>
-              A browser window opened — complete the Google consent flow there. This window will
-              continue automatically.
-            </div>
+            <>
+              <div className="fineprint" style={{ color: 'var(--fg-mute)' }}>
+                A browser window opened — complete the Google consent flow there. This window will
+                continue automatically.
+              </div>
+              <button
+                type="button"
+                className="btn ghost"
+                style={{ justifyContent: 'center' }}
+                onClick={handleCancel}
+              >
+                Cancel
+              </button>
+            </>
           )}
 
           {error && !busy && (
