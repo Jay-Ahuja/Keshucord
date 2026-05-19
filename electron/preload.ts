@@ -71,6 +71,7 @@ const api = {
     signOut: (): Promise<void> => ipcRenderer.invoke('auth:sign-out'),
     getCurrentUser: (): Promise<AuthUserPayload | null> =>
       ipcRenderer.invoke('auth:get-current-user'),
+    cancelSignIn: (): Promise<void> => ipcRenderer.invoke('auth:cancel-sign-in'),
   },
   youtube: {
     createBroadcast: (input: CreateBroadcastPayload): Promise<YouTubeBroadcastPayload> =>

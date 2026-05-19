@@ -9,6 +9,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('auth:sign-in', () => auth.signIn());
   ipcMain.handle('auth:sign-out', () => auth.signOut());
   ipcMain.handle('auth:get-current-user', () => auth.getCurrentUser());
+  ipcMain.handle('auth:cancel-sign-in', () => auth.cancelSignIn());
 
   // Settings
   ipcMain.handle('settings:load', () => settingsStore.load());

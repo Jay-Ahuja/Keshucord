@@ -219,6 +219,33 @@ function pkcePair(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
+/**
+ * Thrown when a sign-in attempt is cancelled — either because the 5-minute
+ * loopback timeout fired (`reason: 'timeout'`) or because the renderer called
+ * `cancelSignIn()` (`reason: 'user-cancelled'`).
+ *
+ * The renderer detects this via `err.name === 'AuthCancelledError'` (and as a
+ * cross-IPC defense, via the `AuthCancelledError:` message prefix — Electron's
+ * structured-clone error serialization preserves `name` and `message` but not
+ * arbitrary own-properties, so we encode the discriminator in both places).
+ */
+export class AuthCancelledError extends Error {
+  readonly reason: 'timeout' | 'user-cancelled';
+  constructor(reason: 'timeout' | 'user-cancelled', message: string) {
+    // Prefix the message so the renderer's name-check has a fallback path if
+    // structured-clone strips the `name` (it doesn't, but belt-and-braces).
+    super(`AuthCancelledError: ${message}`);
+    this.name = 'AuthCancelledError';
+    this.reason = reason;
+  }
+}
+
+// Active loopback abort handle. Set by startLoopback when a server is listening,
+// cleared when the loopback settles (success, error, timeout, or explicit cancel).
+// `cancelSignIn()` calls `activeLoopback?.abort()` to trigger an in-progress
+// rejection from the renderer side.
+let activeLoopback: { abort: () => void } | null = null;
+
 interface LoopbackHandle {
   port: number;
   codePromise: Promise<string>;
@@ -254,6 +281,7 @@ function startLoopback(expectedState: string): Promise<LoopbackHandle> {
         res.end(body);
         if (settled) return;
         settled = true;
+        activeLoopback = null;
         clearTimeout(timer);
         // close after response is flushed
         setTimeout(() => server.close(), 50);
@@ -299,13 +327,15 @@ function startLoopback(expectedState: string): Promise<LoopbackHandle> {
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
+      activeLoopback = null;
       server.close();
-      codeReject(new Error('Sign-in timed out after 5 minutes. Please try again.'));
+      codeReject(new AuthCancelledError('timeout', 'Sign-in timed out after 5 minutes.'));
     }, SIGN_IN_TIMEOUT_MS);
 
     server.on('error', (err) => {
       if (settled) return;
       settled = true;
+      activeLoopback = null;
       clearTimeout(timer);
       rejectSetup(err);
       codeReject(err);
@@ -317,9 +347,35 @@ function startLoopback(expectedState: string): Promise<LoopbackHandle> {
         rejectSetup(new Error('Could not start loopback HTTP server.'));
         return;
       }
+      // Register the abort handle once the server is listening. cancelSignIn()
+      // calls this to trigger an in-progress rejection from the renderer side;
+      // it is a no-op if the loopback has already settled (the `settled` guard
+      // inside the abort closure mirrors the guards on finish/timeout/error).
+      activeLoopback = {
+        abort: () => {
+          if (settled) return;
+          settled = true;
+          activeLoopback = null;
+          clearTimeout(timer);
+          server.close();
+          codeReject(new AuthCancelledError('user-cancelled', 'Sign-in cancelled by user.'));
+        },
+      };
       resolveSetup({ port: address.port, codePromise });
     });
   });
+}
+
+/**
+ * Aborts an in-progress sign-in if one is running. Closes the loopback HTTP
+ * server and causes the pending `signIn()` promise to reject with an
+ * AuthCancelledError. No-op when no sign-in is in flight.
+ *
+ * Called from the renderer via `auth:cancel-sign-in` IPC when the user clicks
+ * "Cancel" in the LoginScreen waiting state.
+ */
+export function cancelSignIn(): void {
+  activeLoopback?.abort();
 }
 
 // Single-flight guard for signIn(). Without this, a double-clicked "Sign In"

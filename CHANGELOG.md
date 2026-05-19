@@ -22,6 +22,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `probe()`, `launchAndWait()`, `ObsLaunchError`.
 
 ### Fixed
+- OAuth sign-in can now be cancelled. Previously, closing the browser
+  tab without completing consent left the app stuck on "Waiting for
+  browser…" for the full 5-minute server timeout, and the timeout
+  itself surfaced as a generic red error banner. `electron/auth.ts` now
+  throws a typed `AuthCancelledError` on both the timeout and a new
+  `cancelSignIn()` path; the renderer detects it via
+  `err.name === 'AuthCancelledError'` and resets silently. New IPC
+  channel: `auth:cancel-sign-in`. The existing single-flight signIn
+  coalesce is preserved — accidental double-clicks still de-dupe onto
+  one loopback server.
 - Defense-in-depth hardening (audit M1, H9). Added a strict
   Content-Security-Policy <meta> to index.html — script-src 'self', no
   eval, connect-src locked to localhost (OBS WS + Vite HMR), object-src
