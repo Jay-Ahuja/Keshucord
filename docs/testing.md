@@ -5,13 +5,22 @@
 
 ## 1. Current state
 
-**There are no automated tests.** The project has no test runner, no
-test files, and no testing packages in `package.json`. TypeScript
-compilation (`tsc --noEmit`) and the Vite dev server are the only
-automated quality checks that currently run.
+Vitest 2.x is installed and configured. Two service-layer test suites exist:
 
-This is a known gap. The sections below document the recommended strategy
-for introducing tests to the codebase.
+| File | Coverage area |
+|---|---|
+| `src/services/__tests__/launchService.test.ts` | 10-step orchestrator, mutex serialization, abort propagation, cleanup branches |
+| `src/services/__tests__/obsService.test.ts` | OBS WebSocket state machine, poll-verify, health polling, `probe()` |
+
+CI runs `npm run test` on every push across ubuntu/windows/macos (`node 22`).
+
+**What is not covered:**
+- All Electron main-process code: `electron/auth.ts`, `electron/youtube.ts`, `electron/tokenStore.ts`, `electron/settingsStore.ts`, `electron/obsProcess.ts`
+- All React screens (`src/screens/`)
+- All React components (`src/components/`)
+- Utilities: `settingsContext.tsx`, `useObsStatus.ts`, `useStreamHealth.ts`, `useBitrateHistory.ts`, `applyAccent.ts`, `format.ts`
+
+Coverage reporting is scoped to `src/services/**/*.ts`. Run `npm run test:coverage` to generate an HTML report in `coverage/`.
 
 ## 2. What TypeScript gives us today
 
@@ -21,174 +30,158 @@ TypeScript `strict: true` provides:
 - Catch-at-compile-time: wrong argument types, missing fields in
   interface implementations, misused discriminated unions.
 
-This is meaningful coverage but tests behavior, not types. Side effects,
-async flows, and cross-system integration are not covered.
+This is meaningful coverage but validates types, not behavior. Side effects,
+async flows, and cross-system integration are not covered by the type system alone.
 
-## 3. Highest-value test targets
+## 3. Test targets by priority
 
-Ranked by return on investment — the areas most likely to regress
-silently without test coverage:
+### Priority 1 — `launchService.ts` ✅ Done
 
-### Priority 1 — `launchService.ts` (unit/integration)
+`src/services/__tests__/launchService.test.ts`
 
-```
-src/services/launchService.ts
-```
+Both services (`obsService`, `youtubeService`) are mocked via `vi.mock`. The
+`beforeEach` restores all default stubs; `afterEach` drains the module-level
+mutex via a pre-aborted launch so no state leaks between tests.
 
-The 10-step orchestrator is the most critical, most complex, and most
-likely to break subtly. Key behaviors to test:
+**What is covered:**
 
-| Behavior | Test approach |
+| Suite | Tests |
 |---|---|
-| All 10 steps run in order on success | Mock all service dependencies; assert step events in order |
-| Step failure triggers cleanup of created resources | Mock steps 3–4 to succeed, step N to throw; assert `deleteBroadcast`/`deleteLiveStream` called |
-| Abort mid-launch triggers cleanup | Start launch, abort signal; assert cleanup ran |
-| Module-level mutex — second call awaits first | Start two concurrent launches; assert only one broadcast created |
-| `broadcast-created` event emitted exactly once after step 3 | Assert event trace |
-| `ingestion-ready` event emitted exactly once after step 6 | Assert event trace |
-| `complete` event carries `status === 'live'` | Assert final broadcast shape |
-| Validation rules (step 1) | Unit test `validateSettings()` directly |
+| `validateSettings` | empty title, 101-char title, 5001-char description, empty OBS password, invalid privacy enum, valid settings (no throw) |
+| `runLaunchSequence happy path` | all 10 step events in order, `broadcast-created` after step 3, `ingestion-ready` after step 6, `complete` with `status: 'live'` after step 10, mutex re-entry after completion |
+| `failure & cleanup` | step 3 fail → no delete called, step 5 fail → both broadcast and stream deleted + `cleanup` event emitted, `obsProgress="configured"` → `obs.disconnect()` only, `obsProgress="streaming"` → `obs.stopStreaming()` + `obs.disconnect()`, disconnect error during cleanup is swallowed |
+| `mutex & abort` | two concurrent calls → second awaits first settlement, pre-aborted signal → throws `AbortError` on first step, mid-launch abort → cleanup runs + `youtube.cancel()` called |
 
-**Recommended**: Vitest with manual mocks for `youtubeService` and
-`obsService`. The services are imported as named exports from
-`../services`, so they can be mocked with `vi.mock('../services')`.
+### Priority 2 — `obsService.ts` ✅ Done
 
-### Priority 2 — `obsService.ts` (unit)
+`src/services/__tests__/obsService.test.ts`
 
-```
-src/services/obsService.ts
-```
+`obs-websocket-js` is mocked via `vi.hoisted` + `vi.mock`; the mock exposes
+`__fire(event, ...args)` to drive OBS events from tests. `beforeEach` resets
+mock call queues and calls `obsService.disconnect()` to return to a
+`disconnected` baseline.
 
-The OBS service holds the most complex internal state machine. Key
-behaviors:
+**What is covered:**
 
-| Behavior | Test approach |
+| Suite | Tests |
 |---|---|
-| `connect()` → `connected` state on success | Mock `OBSWebSocket`, assert `status.state` |
-| `connect()` → `error` state on fail | Assert `status.state` + error mapping |
-| `configureStreamService()` poll-verify succeeds | Mock `obs.call` to return matching settings |
-| `configureStreamService()` poll-verify times out | Mock `obs.call` to always return stale settings; assert timeout throw |
-| `assertActiveStreamServiceSettings()` mismatch → throw | Mock `GetStreamServiceSettings` to return wrong values |
-| `startStreaming()` `outputActive` poll succeeds | Mock `GetStreamStatus.outputActive: true` on second tick |
-| `startStreaming()` `outputActive` never true → throw | Mock always returning `false`; assert timeout throw |
-| Health polling starts when state → `streaming` | Assert `setInterval` called; assert health listeners notified |
-| Health polling stops when state → not `streaming` | Assert `clearInterval` called; assert `notifyHealth(null)` |
-| `ConnectionClosed` event → `disconnected` state | Fire event; assert status |
-| `StreamStateChanged(true)` → `streaming` state | Fire event; assert status |
+| `connect` | success → `connected` + listener notified, code 4009 → `error` + password message, ECONNREFUSED → `error` + localhost message, attempt while streaming → throw |
+| `configureStreamService` | refuses when disconnected, refuses when streaming, refuses on empty rtmpUrl, refuses on empty streamKey, happy path → `SetStreamServiceSettings` with `rtmp_custom`, poll-verify timeout on `rtmp_common` type → YouTube-account-locked message, poll-verify timeout on server mismatch, poll-verify timeout on key mismatch |
+| `assertActiveStreamServiceSettings` | type mismatch → throw, server mismatch → throw, key mismatch → throw, all match → resolves |
+| `startStreaming` | `outputActive` flips true on second poll → `streaming`, never true within 5 s → throws modal-blocking message |
+| `OBS event handlers` | `ConnectionClosed` from `connected` → `disconnected`, `ConnectionClosed` from `streaming` → `disconnected`, `StreamStateChanged(true)` → `streaming`, `StreamStateChanged(false)` → `connected`, `StreamStateChanged(true)` from `disconnected` → no-op |
+| `health polling lifecycle` | starts on `streaming` transition (GetStreamStatus called), stops on exit from `streaming` + null notified to health listeners, bitrate ring buffer caps at 64 samples |
+| `probe` | resolves `true` on WebSocket open, resolves `false` on timeout + closes socket, resolves `false` on error + closes socket |
 
-**Challenge**: `OBSWebSocket` from `obs-websocket-js` is instantiated at
-module scope. Testing requires either mocking the module or testing via
-the exported service functions only (preferred — avoids testing internals).
+### Priority 3 — `electron/youtube.ts` (open)
 
-### Priority 3 — `electron/youtube.ts` (unit)
-
-```
-electron/youtube.ts
-```
-
-The API client has complex error mapping and identity assertions. Key
-behaviors:
+Key behaviors worth testing:
 
 | Behavior | Test approach |
 |---|---|
 | `explainError` maps all known reason strings | Unit test with mock `Response` objects |
-| `bindBroadcastToStream` — `boundStreamId` mismatch throws | Unit test with mock fetch returning wrong ID |
+| `bindBroadcastToStream` — `boundStreamId` mismatch throws | Mock fetch returning wrong ID |
 | `getStreamIngestionInfo` — item ID mismatch throws | Same |
 | `createBroadcast` — best-effort `videos.update` failure doesn't fail the broadcast | Mock `videos.update` to throw; assert broadcast still returned |
 | `waitForStreamActive` (in `youtubeService.ts`) — `active` status returns | Mock `getStreamStatus` to return `'active'` on second tick |
-| `waitForStreamActive` — `error` status throws immediately | Mock `getStreamStatus` to return `'error'` |
-| `waitForStreamActive` — timeout after 90 s throws | Use fake timers |
+| `waitForStreamActive` — `error` status throws immediately | Mock returning `'error'` |
+| `waitForStreamActive` — 90 s timeout throws | Fake timers |
 
-**Challenge**: `electron/youtube.ts` uses `auth.getAccessToken()` for
-every call. Tests need to mock the `auth` module or use a test token.
+**Challenge**: `electron/youtube.ts` calls `auth.getAccessToken()` on every
+request. Tests need to `vi.mock('./auth', ...)` and stub `getAccessToken`.
 
-### Priority 4 — `electron/auth.ts` (integration, optional)
+### Priority 4 — `electron/auth.ts` (open)
 
-The OAuth flow depends on external HTTP servers. A full integration test
-is impractical without a test Google OAuth account + environment.
-Candidate unit tests:
+The OAuth flow depends on external HTTP servers; full integration testing is
+impractical. Candidate unit tests:
 
-- PKCE verifier/challenge generation is correctly base64url-encoded.
+- PKCE verifier/challenge generation produces valid base64url output.
 - State generation produces a non-empty, URL-safe string.
-- `explainError` (token refresh path) handles non-OK responses.
+- `getAccessToken` dedup: two concurrent calls in the refresh window POST to
+  the token endpoint exactly once.
+- `refresh` response: `invalid_grant` → `tokenStore.clear()` called; `503` → cached tokens preserved, error thrown.
+- `hasRequiredYouTubeScope` correctly handles missing, empty, and multi-scope strings.
+- `callbackPage` HTML-escapes `error_description` before rendering it.
 
-### Priority 5 — `settingsStore.ts` + `settingsContext.tsx` (unit)
+### Priority 5 — `settingsStore.ts` + `settingsContext.tsx` (open)
 
 | Behavior | Test approach |
 |---|---|
-| `load()` merges disk payload with defaults | Mock `safeStorage.decryptString`; assert merged output |
-| `save()` sanitizes invalid field values | Call with bad values; assert normalized output |
-| `SettingsProvider` optimistic save rollback | Mock `settingsService.save` to reject; assert context reverts |
+| `load()` merges disk payload with `DEFAULT_USER_SETTINGS` | Mock `safeStorage.decryptString`; assert merged output |
+| `save()` round-trips through `safeStorage` | Assert `encryptString` called with serialized JSON |
+| `SettingsProvider` optimistic save rollback | Mock `settingsService.save` to reject; assert context reverts to prior value |
 
-## 4. Recommended toolchain
+### Priority 6 — `LaunchStatusScreen.tsx` (open)
 
-### Test runner — Vitest
+The screen owns meaningful state (statuses map, details, fatalError,
+cleanedUp) driven by `LaunchEvent`s from the orchestrator. A React Testing
+Library suite that renders the screen with mock `runLaunchSequence` calls and
+asserts UI state transitions would close the largest gap in the renderer layer.
 
-```bash
-npm install -D vitest @vitest/coverage-v8
+## 4. Toolchain
+
+Vitest and all required packages are already installed. No `npm install` is needed.
+
+```
+npm test                # run all tests once (CI mode)
+npm run test:watch      # re-run on file changes
+npm run test:coverage   # run + generate coverage report in coverage/
 ```
 
-Vitest integrates directly with the Vite config, requires no separate
-babel transform, and shares TypeScript config with the renderer build.
-Add to `package.json`:
-
-```json
-"scripts": {
-  "test": "vitest run",
-  "test:watch": "vitest",
-  "test:coverage": "vitest run --coverage"
-}
-```
+**`vitest.config.ts` key settings:**
+- `environment: 'jsdom'` — gives renderer tests a browser-like DOM.
+- `globals: true` — `vi`, `describe`, `it`, `expect` etc. are available without imports.
+- `exclude: ['.claude/**']` — prevents agent worktrees from being collected.
+- Coverage `include: ['src/services/**/*.ts']` — scoped to the service layer.
 
 ### Electron main process
 
-Main-process code (`electron/`) cannot run inside Vitest's JSDOM or
-happy-dom environments. Options:
+Main-process code (`electron/`) uses Node-only APIs (`safeStorage`, `app.getPath`,
+`crypto`, `http`) that are unavailable in jsdom. Options:
 
-1. **Refactor to pure functions**: Extract `explainError`, `maskKey`,
-   validation helpers, and identity assertion logic into framework-free
-   modules that can be tested without Electron APIs. This is the
-   recommended path — these are the most valuable tests.
-2. **Mock Electron**: Use `vi.mock('electron', ...)` to stub `safeStorage`,
-   `app.getPath`, etc. Viable but requires careful maintenance.
-3. **Skip electron/ tests initially**: Focus first on the renderer
-   services which have no Electron dependency.
+1. **Mock Electron**: `vi.mock('electron', () => ({ safeStorage: { ... }, app: { ... } }))`.
+   Viable for unit tests of `tokenStore` and `settingsStore`.
+2. **Extract pure functions**: Move `explainError`, `maskKey`, validation helpers,
+   and identity assertions into framework-free modules. Recommended for `youtube.ts`.
+3. **Skip initially**: The renderer services (already tested) are the higher-value
+   targets; main-process unit tests are incremental.
 
-### OBS WebSocket
+### OBS WebSocket mocking pattern
 
-```bash
-npm install -D @types/ws
-```
-
-For `obsService` tests, mock `obs-websocket-js` entirely:
+The actual pattern used in `obsService.test.ts` — use `vi.hoisted` to expose
+the mock instance before module load, then drive events via `__fire`:
 
 ```ts
+const holder = vi.hoisted(() => ({ instance: null as MockObsHandle | null }));
 vi.mock('obs-websocket-js', () => ({
-  default: vi.fn().mockImplementation(() => ({
-    connect: vi.fn(),
-    call: vi.fn(),
-    on: vi.fn(),
-    off: vi.fn(),
-  })),
+  default: vi.fn().mockImplementation(() => {
+    const handlers = new Map<string, (...args: unknown[]) => void>();
+    const handle = {
+      connect: vi.fn(), call: vi.fn(), disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn((event, handler) => handlers.set(event, handler)), off: vi.fn(),
+      __fire: (event, ...args) => handlers.get(event)?.(...args),
+    };
+    holder.instance = handle;
+    return handle;
+  }),
 }));
 ```
 
 ### Component tests — React Testing Library (optional)
 
 ```bash
-npm install -D @testing-library/react @testing-library/user-event jsdom
+npm install -D @testing-library/react @testing-library/user-event
 ```
 
-Component tests are lower priority than service/logic tests. The main
-value would be testing screen-level integration: e.g., that
-`LaunchStatusScreen` correctly updates the ring and checklist given a
-sequence of `LaunchEvent`s.
+`jsdom` is already a devDependency. Component tests are lower priority than
+service/logic tests. The main value is testing screen-level integration —
+e.g., that `LaunchStatusScreen` correctly updates the ring and checklist given
+a sequence of `LaunchEvent`s.
 
 ## 5. What not to test
 
-- `delay.ts` — dead code, slated for deletion.
-- `applyAccent.ts` — pure function that writes CSS variables; test only
-  if the oklch triplets change.
+- `applyAccent.ts` — pure function that writes CSS variables; only worth
+  testing if the oklch triplets or token names change.
 - `format.ts` — `capitalize`, `initialsOf`, `formatDuration` are simple
   enough to validate by inspection.
 - Tailwind CSS output — tested by visual inspection.
@@ -207,8 +200,8 @@ until the app ships to more than a handful of users.
 
 ## 7. Manual test checklist
 
-Until automated tests exist, verify the following before significant
-changes:
+Use this checklist for changes that touch auth, the launch flow, or OBS integration —
+areas not yet covered by automated tests.
 
 **Authentication:**
 - [ ] Sign in (full OAuth flow, opens browser, returns to app)

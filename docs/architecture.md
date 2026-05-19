@@ -27,7 +27,7 @@ throughout — see [`src/styles/keshucord.css`](../src/styles/keshucord.css).
 
 | Layer | Choice | Why |
 |---|---|---|
-| Desktop shell | Electron 31 | Cross-platform shell; needed for OS-level integrations (file system, network, OS keychain). |
+| Desktop shell | Electron 34 | Cross-platform shell; needed for OS-level integrations (file system, network, OS keychain). |
 | UI framework | React 18 + TypeScript 5 | Standard for typed component-driven UIs. |
 | Bundler | Vite 5 | Fast dev server, simple Electron-renderer config. |
 | Styling | Hand-written CSS design system (`keshucord.css`) + Tailwind preflight | The design ships as a CSS file with oklch tokens. Tailwind is loaded for preflight + a couple of utility classes used by the bootstrap spinner. Component classes are written as plain CSS, not Tailwind utilities. |
@@ -166,8 +166,7 @@ Keshucord/
 │       ├── settingsContext.tsx    SettingsProvider + useSettings hook
 │       ├── useObsStatus.ts        Subscribes to obsService status
 │       ├── useStreamHealth.ts     Subscribes to obsService health
-│       ├── useBitrateHistory.ts   Subscribes to obsService bitrate ring buffer
-│       └── delay.ts               (DEAD CODE — not referenced anywhere)
+│       └── useBitrateHistory.ts   Subscribes to obsService bitrate ring buffer
 ├── docs/                          Engineering docs (this folder)
 └── (root config: package.json, tsconfig.*.json, vite.config.ts, …)
 ```
@@ -417,11 +416,9 @@ makes the sidebar-compact toggle and accent swatches feel instant.
 
 | Item | Where | Notes |
 |---|---|---|
-| `src/utils/delay.ts` | unused module | Was used by mocks pre-real-API; can be deleted. |
 | `userSettings.appearanceDensity`, `userSettings.appearanceReduceMotion` | `types/settings.ts` + Settings UI | Persisted and editable, but no CSS hooks consume them yet. |
-| `YouTubeUser.avatarColor` | `types/youtube.ts`, `youtubeService.decorate` | Still produced (hashed gradient) but the only consumer (`UserChip`) was deleted. Sidebar uses CSS `.avatar` gradient directly. |
+| `YouTubeUser.avatarColor` + `youtubeService.decorate()` + the `AVATAR_PALETTE` constant | `types/youtube.ts`, `services/youtubeService.ts` | `decorate()` still hashes the user id to a CSS gradient string and attaches it as `avatarColor`, but the only consumer (`UserChip`) was deleted. The Sidebar's avatar uses a CSS `.avatar` gradient directly. Whole code path can be removed. |
 | `applyAccent` writes are not persisted to `:root` early | `App.tsx` `useEffect` runs after first paint | The user might see a 1-frame flash of the default accent on first launch. Cosmetic. |
-| `tailwind.config.js` `brand-*` / `ink-*` palette | unused | All consumers migrated to oklch tokens. The unused colors don't appear in the bundle (Tailwind purges) but the config block is dead. |
 | `Open in YouTube` / `Copy share link` buttons | `LaunchStatusScreen.tsx` | No toast feedback after click. |
 | Settings → Connections host/port | `SettingsScreen.tsx` | Hardcoded loopback:4455, read-only. Custom OBS endpoints not supported. |
 | `IngestionInfoCard.SecretValue` clipboard | renderer | Uses `navigator.clipboard.writeText` directly; doesn't go through the main process. Fine for desktop, but means we don't have OS-level paste protection. |
