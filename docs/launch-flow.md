@@ -557,7 +557,7 @@ In the catch block, after the YouTube deletion phase, we branch on
 
 | `obsProgress` at failure | Cleanup action | Rationale |
 |---|---|---|
-| `'streaming'` (and `obs.getStatus().state === 'streaming'`) | `await obs.stopStreaming()` with a 5 s `Promise.race` timeout | OBS is pushing RTMP at a broadcast we just deleted in the previous phase. Leaving it running pushes video into a tombstoned endpoint — the user gets a frozen LIVE chip and a failed RTMP output. A graceful stop is strictly better. |
+| `'streaming'` | `await obs.forceStopStream(5_000)` then `await obs.disconnect()` (each bounded at 5 s) | OBS is — or is about to be — pushing RTMP at the broadcast we just deleted. Leaving it running pushes video into a tombstoned endpoint. We use `forceStopStream`, not the guarded `stopStreaming`, because `obsProgress` is flipped to `'streaming'` BEFORE OBS emits `StreamStateChanged(outputActive=true)`; the guarded variant would no-op in the race window where StartStream was accepted but the state change is still in flight (audit M4). |
 | `'connected'` or `'configured'` (and OBS state is `connected`/`connecting`) | `await obs.disconnect()` with a 5 s `Promise.race` timeout | We may have written a `rtmp_custom` service pointing at the deleted broadcast. Dropping the connection guarantees the next launch's `connect-obs` step starts from a clean slate instead of inheriting a stale WebSocket or stale service config. |
 | `'none'` | nothing | We never touched OBS — nothing to undo. |
 
@@ -570,16 +570,15 @@ generous enough that a healthy OBS always finishes inside it, and short
 enough that a frozen OBS doesn't pin the user.
 
 ```ts
-await Promise.race<unknown>([
-  obs.stopStreaming(),
-  new Promise((_, reject) =>
-    setTimeout(() => reject(new Error('stopStreaming timed out')), 5000),
-  ),
-]).catch((stopErr) => console.warn('[launch] cleanup stopStreaming:', stopErr));
+await obs.forceStopStream(5_000).catch((stopErr) =>
+  console.warn('[launch] cleanup forceStopStream:', stopErr),
+);
 ```
 
-The `.catch` makes the cleanup branch best-effort — a failed stop or
-disconnect doesn't mask the original launch error.
+`obs.forceStopStream` is internally `withTimeout`-wrapped so the catch
+block can't hang waiting for a wedged OBS. The `.catch` makes the
+cleanup branch best-effort — a failed stop or disconnect doesn't mask
+the original launch error.
 
 ### Cleanup invariants
 
@@ -592,13 +591,17 @@ disconnect doesn't mask the original launch error.
 - **Order-independent YouTube deletion**: deleting the stream first vs
   broadcast first doesn't matter to YouTube — `bind` is automatically
   severed when either side is deleted.
-- **Bounded OBS calls**: both `stopStreaming()` and `disconnect()` are
-  wrapped in `Promise.race` against a 5 s timeout. The orchestrator
-  cannot hang indefinitely waiting for a frozen OBS.
-- **No catch-block cleanup of `'streaming'` if OBS already left that
-  state**: we re-check `obs.getStatus().state === 'streaming'` before
-  calling `stopStreaming()`. If OBS stopped on its own between the
-  failure and the catch block, we don't issue a redundant Stop.
+- **Bounded OBS calls**: `forceStopStream` and `disconnect()` are both
+  bounded at 5 s — `forceStopStream` via its internal `withTimeout`
+  wrapper, `disconnect()` via `Promise.race`. The orchestrator cannot
+  hang indefinitely waiting for a frozen OBS.
+- **Unguarded StopStream in the `'streaming'` arm**: cleanup uses
+  `obs.forceStopStream`, not `obs.stopStreaming`. The guarded variant
+  checks `status.state === 'streaming'` and no-ops if a delayed
+  `StreamStateChanged(outputActive=true)` hasn't arrived yet — which is
+  exactly the race window where OBS *has* accepted StartStream and is
+  about to push video. Issuing the StopStream regardless cleanly tears
+  down whichever side of the race actually won (audit M4).
 
 The previous documented invariant ("never auto-stop a live broadcast on
 a flaky `go-live` step") was rewritten in this version. Its reasoning

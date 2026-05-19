@@ -143,7 +143,13 @@ export async function runLaunchSequence(opts: RunLaunchOptions): Promise<YouTube
       // may have replaced us, in which case we leave its bookkeeping alone.
       if (activeLaunch === myPromise) activeLaunch = null;
       if (activeAbort === myAbort) activeAbort = null;
+      // Symmetric listener detachment — the catch block in _runLaunchSequence
+      // detaches both signals on failure (H7), so on the happy path we mirror
+      // that here. `myAbort` becomes unreachable after this finally returns,
+      // so this is belt-and-braces against future refactors that retain the
+      // controller (e.g. for diagnostics).
       opts.signal?.removeEventListener('abort', propagate);
+      myAbort.signal.removeEventListener('abort', propagate);
     }
   })();
 
@@ -387,22 +393,20 @@ async function _runLaunchSequence(
     // frozen OBS doesn't pin the user.
     const CLEANUP_TIMEOUT_MS = 5000;
     if (obsProgress === 'streaming') {
-      // H3: always attempt stopStreaming + disconnect. obsService.stopStreaming
-      // is a no-op when status.state !== 'streaming', so this is benign in the
-      // silent-StartStream case but covers the case where OBS did start but our
-      // event handler never received outputActive=true (the verify-loop timed
-      // out optimistically with obsProgress already flipped to 'streaming').
-      // Leaving OBS pushing RTMP to a tombstoned endpoint is strictly worse
-      // than a graceful stop.
-      log('launch-cleanup: obsProgress="streaming" after a failed launch — stopping and disconnecting OBS');
-      await Promise.race<unknown>([
-        obs.stopStreaming(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('stopStreaming timed out')), CLEANUP_TIMEOUT_MS),
-        ),
-      ]).catch((stopErr) =>
+      // H3 / M4: always issue an unconditional StopStream + disconnect.
+      // `obs.stopStreaming()` is guarded on `status.state === 'streaming'`,
+      // so in the race window where (a) StartStream was accepted by OBS but
+      // (b) our local status hasn't yet flipped to 'streaming' (the
+      // StreamStateChanged event is still in flight or the verify-loop
+      // timed out optimistically), the guarded call would no-op and the
+      // subsequent disconnect would sever the WebSocket while OBS pushed
+      // RTMP to a tombstoned broadcast for 10–30 s. `forceStopStream`
+      // bypasses the guard so we cleanly tear down whichever side of the
+      // race actually won.
+      log('launch-cleanup: obsProgress="streaming" after a failed launch — force-stopping and disconnecting OBS');
+      await obs.forceStopStream(CLEANUP_TIMEOUT_MS).catch((stopErr) =>
         console.warn(
-          '[launch] cleanup stopStreaming:',
+          '[launch] cleanup forceStopStream:',
           stopErr instanceof Error ? stopErr.message : stopErr,
         ),
       );

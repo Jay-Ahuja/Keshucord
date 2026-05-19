@@ -17,6 +17,7 @@ vi.mock('../obsService', () => ({
   assertActiveStreamServiceSettings: vi.fn(async () => undefined),
   startStreaming: vi.fn(async () => ({ state: 'streaming' as const })),
   stopStreaming: vi.fn(async () => ({ state: 'connected' as const })),
+  forceStopStream: vi.fn(async () => undefined),
   getStatus: vi.fn(() => ({ state: 'connected' as const })),
 }));
 
@@ -105,6 +106,7 @@ beforeEach(() => {
   vi.mocked(obs.assertActiveStreamServiceSettings).mockResolvedValue(undefined);
   vi.mocked(obs.startStreaming).mockResolvedValue({ state: 'streaming' as const });
   vi.mocked(obs.stopStreaming).mockResolvedValue({ state: 'connected' as const });
+  vi.mocked(obs.forceStopStream).mockResolvedValue(undefined);
   vi.mocked(obs.getStatus).mockReturnValue({ state: 'connected' as const });
 
   vi.mocked(youtube.getCurrentUser).mockResolvedValue({
@@ -351,7 +353,7 @@ describe('runLaunchSequence failure & cleanup', () => {
     expect(vi.mocked(obs.stopStreaming)).not.toHaveBeenCalled();
   });
 
-  it('failure mid-way through step 9 where obsProgress reaches "streaming": cleanup calls obs.stopStreaming() and obs.disconnect()', async () => {
+  it('failure mid-way through step 9 where obsProgress reaches "streaming": cleanup calls obs.forceStopStream() and obs.disconnect()', async () => {
     // assertActive succeeds, startStreaming succeeds (so obsProgress flips to
     // 'streaming'), then the *next* step (go-live) fails.
     vi.mocked(youtube.waitForStreamActive).mockRejectedValueOnce(new Error('never went active'));
@@ -361,13 +363,30 @@ describe('runLaunchSequence failure & cleanup', () => {
       runLaunchSequence({ settings: makeSettings(), onEvent: () => undefined }),
     ).rejects.toThrow('never went active');
 
-    // Audit H3: cleanup's 'streaming' arm always attempts both stopStreaming
-    // and disconnect now (previously only stopStreaming, and only when
-    // getStatus().state === 'streaming'). The widened behavior is needed
-    // because obsProgress is now flipped to 'streaming' BEFORE the StartStream
-    // call returns, so a verify-loop timeout can land us in this arm even
-    // when getStatus() never observed the streaming state.
-    expect(vi.mocked(obs.stopStreaming)).toHaveBeenCalled();
+    // Audit H3 + M4: cleanup's 'streaming' arm uses forceStopStream (which
+    // bypasses obsService.stopStreaming's `status.state === 'streaming'`
+    // guard) so a delayed StreamStateChanged race doesn't leave OBS pushing
+    // RTMP to a tombstoned broadcast. The guarded stopStreaming MUST NOT be
+    // called from cleanup — that's the bug M4 fixed.
+    expect(vi.mocked(obs.forceStopStream)).toHaveBeenCalled();
+    expect(vi.mocked(obs.stopStreaming)).not.toHaveBeenCalled();
+    expect(vi.mocked(obs.disconnect)).toHaveBeenCalled();
+  });
+
+  it('M4: even when local status is still "connected" (StreamStateChanged not yet observed), cleanup\'s streaming arm still issues forceStopStream', async () => {
+    // The race window M4 addresses: obsProgress flips to 'streaming' before
+    // OBS emits StreamStateChanged(true), so local status.state is still
+    // 'connected'. The old stopStreaming() guard would no-op in this window
+    // and disconnect would sever the WebSocket while OBS pushed RTMP to a
+    // deleted broadcast. forceStopStream must run regardless.
+    vi.mocked(youtube.waitForStreamActive).mockRejectedValueOnce(new Error('never went active'));
+    vi.mocked(obs.getStatus).mockReturnValue({ state: 'connected' as const });
+
+    await expect(
+      runLaunchSequence({ settings: makeSettings(), onEvent: () => undefined }),
+    ).rejects.toThrow('never went active');
+
+    expect(vi.mocked(obs.forceStopStream)).toHaveBeenCalled();
     expect(vi.mocked(obs.disconnect)).toHaveBeenCalled();
   });
 

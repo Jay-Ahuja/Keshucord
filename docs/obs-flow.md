@@ -190,13 +190,31 @@ startStreaming()
 
 stopStreaming()                          ◄── called by:
    │                                          - DashScreen "End stream" button
-   ├─ obs.call('StopStream')                  - SettingsScreen Connections (not currently)
-   │                                          - end-of-app cleanup (implicit via disconnect)
+   ├─ if status.state !== 'streaming': return - SettingsScreen Connections (not currently)
+   ├─ obs.call('StopStream')                  - end-of-app cleanup (implicit via disconnect)
    ├─ setStatus({ state: 'connected', … })
    │   └─ side effect: stopHealthPolling()
    │       └─ notifyHealth(null) + notifyBitrateHistory()
    └─ return new status
+
+forceStopStream(timeoutMs = 5_000)        ◄── called by:
+   │                                          - launchService cleanup branch's
+   │                                            'streaming' arm (audit M4)
+   ├─ obs.call('StopStream') wrapped in withTimeout
+   └─ returns void; does NOT mutate status (StreamStateChanged /
+      ConnectionClosed drive the transition through setStatus)
 ```
+
+`forceStopStream` is a deliberate escape hatch: it does the same RPC as
+`stopStreaming` but skips the `status.state === 'streaming'` guard. The
+launch cleanup branch needs this because `obsProgress` flips to
+`'streaming'` BEFORE OBS emits `StreamStateChanged(outputActive=true)`
+— so in the race window where StartStream was accepted but the local
+state machine hasn't yet observed it, the guarded `stopStreaming` would
+no-op and the subsequent disconnect would sever the WebSocket while
+OBS pushed RTMP to a tombstoned broadcast for 10–30 s. Outside the
+cleanup branch, prefer the guarded `stopStreaming` for state-machine
+hygiene (it won't issue a StopStream OBS doesn't expect).
 
 ### Pre-flight: `probe()` and `launchAndWait()`
 
@@ -345,7 +363,7 @@ is misleading. They need to know.
 | `SetStreamServiceSettings` | `configureStreamService` | Write new service config. |
 | `GetStats` | `pollHealth` | activeFps, averageFrameRenderTime. |
 | `StartStream` | `startStreaming` | Begin RTMP push. |
-| `StopStream` | `stopStreaming` | End RTMP push. |
+| `StopStream` | `stopStreaming`, `forceStopStream` | End RTMP push. `stopStreaming` guards on local state; `forceStopStream` bypasses the guard (cleanup-only). |
 
 ### Subscriptions (`obs.on(...)`)
 
