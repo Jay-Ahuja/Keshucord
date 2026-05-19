@@ -48,6 +48,17 @@ directly — only the `window.keshucord` object exposed by the preload.
 | `auth:sign-in` | `window.keshucord.auth.signIn()` | `auth.signIn()` | `AuthUserPayload` |
 | `auth:sign-out` | `window.keshucord.auth.signOut()` | `auth.signOut()` | `void` |
 | `auth:get-current-user` | `window.keshucord.auth.getCurrentUser()` | `auth.getCurrentUser()` | `AuthUserPayload \| null` |
+| `auth:cancel-sign-in` | `window.keshucord.auth.cancelSignIn()` | `auth.cancelSignIn()` | `void` |
+
+`auth:cancel-sign-in` is the renderer-driven abort path for an in-flight
+sign-in. The loopback HTTP server already has a 5-minute timeout that
+rejects with an `AuthCancelledError` (`reason: 'timeout'`); this channel
+lets the renderer proactively abort the same loopback (rejecting with
+`reason: 'user-cancelled'`) when the user clicks Cancel in the
+"Waiting for browser…" state. The single-flight `signIn()` coalesce is
+preserved — accidental double-clicks still de-dupe onto one loopback
+server. The renderer distinguishes cancellation from a real auth failure
+via `err.name === 'AuthCancelledError'`.
 
 ### 2.2 Settings namespace
 
@@ -104,7 +115,7 @@ we spawn it?
   spawn returns as soon as the OS hand-off succeeds; reachability is
   the renderer's responsibility (see `obsService.launchAndWait`).
 
-**Total: 18 channels.** 3 auth + 3 settings + 10 YouTube + 2 OBS.
+**Total: 19 channels.** 4 auth + 3 settings + 10 YouTube + 2 OBS.
 
 ## 3. Payload types
 
@@ -295,7 +306,7 @@ app.whenReady().then(() => {
 
 | Namespace | Verbs used |
 |---|---|
-| `auth` | `sign-in`, `sign-out`, `get-current-user` |
+| `auth` | `sign-in`, `sign-out`, `get-current-user`, `cancel-sign-in` |
 | `settings` | `load`, `save`, `reset` |
 | `youtube` | `create-broadcast`, `create-stream`, `bind`, `get-ingestion`, `get-stream-status`, `transition-live`, `transition-complete`, `delete-broadcast`, `delete-stream`, `cancel` |
 | `obs` | `is-running`, `launch` |

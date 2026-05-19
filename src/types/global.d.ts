@@ -13,6 +13,7 @@ export interface KeshucordAPI {
     signIn(): Promise<YouTubeUser>;
     signOut(): Promise<void>;
     getCurrentUser(): Promise<YouTubeUser | null>;
+    cancelSignIn(): Promise<void>;
   };
   youtube: {
     createBroadcast(input: CreateBroadcastInput): Promise<YouTubeBroadcast>;

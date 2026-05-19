@@ -22,6 +22,17 @@ export async function getCurrentUser(): Promise<YouTubeUser | null> {
   return user ? decorate(user) : null;
 }
 
+/**
+ * Aborts an in-progress sign-in if one is running. Rejects the pending
+ * `signIn()` promise with an `AuthCancelledError` (detectable in the
+ * renderer via `err.name === 'AuthCancelledError'`). No-op when no
+ * sign-in is in flight. Used by LoginScreen's Cancel control while the
+ * UI is in the "Waiting for browser…" state.
+ */
+export async function cancelSignIn(): Promise<void> {
+  await window.keshucord.auth.cancelSignIn();
+}
+
 // --- YouTube Live Streaming API (real, via main process) ---
 
 export async function createBroadcast(settings: StreamSettings): Promise<YouTubeBroadcast> {
