@@ -22,6 +22,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `probe()`, `launchAndWait()`, `ObsLaunchError`.
 
 ### Fixed
+- Settings persistence error handling (audit H4/H5). A failed
+  `settings.enc` load no longer silently overwrites the file with blanks
+  on the first save — `SettingsProvider` now exposes a `loadFailed`
+  flag, `save`/`reset` reject when set, and `SettingsScreen` shows a
+  non-dismissible banner explaining the state. The `save()` catch path
+  no longer overwrites a newer queued save's optimistic state — the
+  disk-rollback only fires when the failed save was still the latest.
 - CreateScreen no longer blocks the Go Live click when the OBS WebSocket
   password isn't set — the new pre-flight dialog needs to surface
   BEFORE asking the user to set credentials for a service they haven't
