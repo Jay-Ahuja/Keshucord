@@ -87,6 +87,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   re-fire the launch-firing useEffect. OBS-stop failure aborts before
   calling YouTube; YouTube-transition failure surfaces a retry-friendly
   message without reversing the OBS stop.
+- DashScreen's End stream button was permanently disabled after a
+  YouTube `transitionToComplete` failure: OBS had already stopped so
+  `isStreaming` was false, the `!isStreaming || endStreamBusy` disable
+  rule latched on, and the error banner had no dismiss control — the
+  copy promised "you can retry" but no retry surface existed. The
+  button now stays clickable while a stale `broadcastId` +
+  `endStreamError` pair both exist, and that retry path skips the OBS
+  stop step (OBS is already stopped) and only retries the YouTube
+  transition. The button label switches to "Retry ending broadcast" in
+  this state. `endStreamError` clears on a fresh click and via a
+  `useEffect` when `broadcastId` becomes null (a new launch is
+  starting; the prior error is no longer relevant).
 
 ### Documentation
 - Added `docs/electron-ipc.md` — complete IPC channel registry and security model.
