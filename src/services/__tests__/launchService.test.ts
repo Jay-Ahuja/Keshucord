@@ -351,7 +351,7 @@ describe('runLaunchSequence failure & cleanup', () => {
     expect(vi.mocked(obs.stopStreaming)).not.toHaveBeenCalled();
   });
 
-  it('failure mid-way through step 9 where obsProgress reaches "streaming": cleanup calls obs.stopStreaming()', async () => {
+  it('failure mid-way through step 9 where obsProgress reaches "streaming": cleanup calls obs.stopStreaming() and obs.disconnect()', async () => {
     // assertActive succeeds, startStreaming succeeds (so obsProgress flips to
     // 'streaming'), then the *next* step (go-live) fails.
     vi.mocked(youtube.waitForStreamActive).mockRejectedValueOnce(new Error('never went active'));
@@ -361,8 +361,14 @@ describe('runLaunchSequence failure & cleanup', () => {
       runLaunchSequence({ settings: makeSettings(), onEvent: () => undefined }),
     ).rejects.toThrow('never went active');
 
+    // Audit H3: cleanup's 'streaming' arm always attempts both stopStreaming
+    // and disconnect now (previously only stopStreaming, and only when
+    // getStatus().state === 'streaming'). The widened behavior is needed
+    // because obsProgress is now flipped to 'streaming' BEFORE the StartStream
+    // call returns, so a verify-loop timeout can land us in this arm even
+    // when getStatus() never observed the streaming state.
     expect(vi.mocked(obs.stopStreaming)).toHaveBeenCalled();
-    expect(vi.mocked(obs.disconnect)).not.toHaveBeenCalled();
+    expect(vi.mocked(obs.disconnect)).toHaveBeenCalled();
   });
 
   it('failure during cleanup itself: a slow obs.disconnect() is awaited but does not crash the test', async () => {
