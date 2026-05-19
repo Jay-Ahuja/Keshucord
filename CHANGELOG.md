@@ -22,6 +22,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `probe()`, `launchAndWait()`, `ObsLaunchError`.
 
 ### Fixed
+- Defense-in-depth hardening (audit M1, H9). Added a strict
+  Content-Security-Policy <meta> to index.html — script-src 'self', no
+  eval, connect-src locked to localhost (OBS WS + Vite HMR), object-src
+  'none'. Expanded CI to a [ubuntu, windows, macos] matrix on Node 22 so
+  Windows-only code paths in electron/obsProcess.ts (tasklist, reg query)
+  are no longer invisible to CI. engines.node widened to <23.0.0 since
+  Node 20 has reached EOL.
 - CreateScreen no longer blocks the Go Live click when the OBS WebSocket
   password isn't set — the new pre-flight dialog needs to surface
   BEFORE asking the user to set credentials for a service they haven't

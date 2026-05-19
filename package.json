@@ -6,7 +6,7 @@
   "main": "dist-electron/main.js",
   "license": "MIT",
   "engines": {
-    "node": ">=20.0.0 <21.0.0"
+    "node": ">=20.0.0 <23.0.0"
   },
   "scripts": {
     "dev": "concurrently -k -n vite,electron -c magenta,cyan \"npm:dev:vite\" \"npm:dev:electron\"",
