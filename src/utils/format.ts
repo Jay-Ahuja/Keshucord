@@ -22,3 +22,19 @@ export function formatDuration(ms: number): string {
   const ss = String(total % 60).padStart(2, '0');
   return `${hh}:${mm}:${ss}`;
 }
+
+/**
+ * Today's date as `M/D/YYYY` with no zero-padding. Used by the Create
+ * screen when `titleDatePrefix` is on to prepend the date to stream titles.
+ *
+ * Deliberately uses Date builtins rather than `Intl.DateTimeFormat`: the
+ * Intl path's output depends on the host locale (e.g. `en-GB` yields
+ * `DD/MM/YYYY`, `de-DE` yields `D.M.YYYY`), which would silently diverge
+ * from the documented M/D/YYYY contract — and from the duplicate-prefix
+ * check in CreateScreen, which would then re-prepend the date on every
+ * re-mount in those locales.
+ */
+export function formatDatePrefix(): string {
+  const d = new Date();
+  return (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
+}

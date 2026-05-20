@@ -59,6 +59,7 @@ export interface PersistedSettingsPayload {
   defaultDescription: string;
   defaultPrivacy: 'public' | 'unlisted' | 'private';
   defaultCategory: string;
+  titleDatePrefix: boolean;
   appearanceAccent: 'purple' | 'cobalt' | 'ember' | 'mono';
   appearanceDensity: 'comfortable' | 'compact';
   appearanceReduceMotion: boolean;

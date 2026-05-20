@@ -13,6 +13,8 @@ export interface PersistedSettings {
   defaultDescription: string;
   defaultPrivacy: Privacy;
   defaultCategory: string;
+  /** Auto-prepend today's date to the Create screen's title field. */
+  titleDatePrefix: boolean;
 
   // Appearance preferences (Keshucord redesign).
   appearanceAccent: AppearanceAccent;
@@ -27,6 +29,7 @@ export const DEFAULT_PERSISTED_SETTINGS: PersistedSettings = {
   defaultDescription: '',
   defaultPrivacy: 'public',
   defaultCategory: '',
+  titleDatePrefix: false,
   appearanceAccent: 'purple',
   appearanceDensity: 'comfortable',
   appearanceReduceMotion: false,
@@ -122,6 +125,7 @@ function normalize(settings: Partial<PersistedSettings>): PersistedSettings {
     defaultDescription: String(settings.defaultDescription ?? ''),
     defaultPrivacy: normalizePrivacy(settings.defaultPrivacy),
     defaultCategory: String(settings.defaultCategory ?? ''),
+    titleDatePrefix: Boolean(settings.titleDatePrefix),
     appearanceAccent: normalizeAccent(settings.appearanceAccent),
     appearanceDensity: normalizeDensity(settings.appearanceDensity),
     appearanceReduceMotion: Boolean(settings.appearanceReduceMotion),

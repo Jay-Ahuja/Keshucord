@@ -148,7 +148,7 @@ flow at all.
 
 ## 4. Default stream settings logic
 
-Five "default" fields on `UserSettings`:
+Six "default" fields on `UserSettings`:
 
 | Field | Type | Used as |
 |---|---|---|
@@ -156,6 +156,7 @@ Five "default" fields on `UserSettings`:
 | `defaultDescription` | `string` | seed for `StreamSettings.description` |
 | `defaultPrivacy` | `Privacy` | seed for `StreamSettings.privacy` |
 | `defaultCategory` | `string` | seed for `StreamSettings.category` |
+| `titleDatePrefix` | `boolean` | when on, CreateScreen prepends today's `M/D/YYYY - ` to the title on mount (editable plain text after insertion — not a separate field) |
 | `obsPassword` | `string` | passed directly into the launch flow |
 
 These are seeded into `streamSettings` (the live launch form) by
@@ -277,7 +278,7 @@ Tabbed layout matching the design's `.settings` rule.
 | Tab | Sections | Real / placeholder |
 |---|---|---|
 | Connections | host/port (read-only), WebSocket password (real + Test connection), Scene collection (read-only display) | **2 real + 1 read-only** |
-| Stream defaults | default title, description, privacy, category | **4 real** |
+| Stream defaults | default title, description, privacy, category, title date prefix | **5 real** |
 | YouTube account | Connected channel + Sign out, Connect channel | **1 real, 1 disabled (multi-account)** |
 | Appearance | Accent swatches, Density, Reduce motion, Window glass | **3 real, 1 disabled (window glass)** |
 | Shortcuts | Static list of ⌘1/⌘N/⌘H/⌘,/⌘\ | **read-only** |
