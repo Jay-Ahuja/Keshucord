@@ -59,6 +59,7 @@ vi.mock('../youtubeService', () => ({
   ),
   deleteBroadcast: vi.fn(async () => undefined),
   deleteLiveStream: vi.fn(async () => undefined),
+  uploadThumbnail: vi.fn(async () => undefined),
   cancel: vi.fn(async () => undefined),
 }));
 
@@ -139,6 +140,7 @@ beforeEach(() => {
   }));
   vi.mocked(youtube.deleteBroadcast).mockResolvedValue(undefined);
   vi.mocked(youtube.deleteLiveStream).mockResolvedValue(undefined);
+  vi.mocked(youtube.uploadThumbnail).mockResolvedValue(undefined);
   vi.mocked(youtube.cancel).mockResolvedValue(undefined);
 });
 
@@ -290,6 +292,65 @@ describe('runLaunchSequence happy path', () => {
     expect(events.filter((e) => e.type === 'complete')).toHaveLength(1);
     // createBroadcast was called once per launch -> 2 total.
     expect(vi.mocked(youtube.createBroadcast)).toHaveBeenCalledTimes(2);
+  });
+
+  // ---- best-effort thumbnail sub-step (audit-cycle follow-up) ----
+
+  it('thumbnail upload (success): emits "Uploading…" then "uploaded." details on the broadcast step and continues to step 10', async () => {
+    const file = new File([new Uint8Array([1, 2, 3])], 'thumb.jpg', { type: 'image/jpeg' });
+    const events: LaunchEvent[] = [];
+
+    await runLaunchSequence({
+      settings: makeSettings({ thumbnailFile: file }),
+      onEvent: (e) => events.push(e),
+    });
+
+    expect(vi.mocked(youtube.uploadThumbnail)).toHaveBeenCalledWith('bcast-1', file);
+
+    const broadcastDetails = events.filter(
+      (e) => e.type === 'step:detail' && e.stepId === 'broadcast',
+    ) as Extract<LaunchEvent, { type: 'step:detail' }>[];
+    expect(broadcastDetails.map((d) => d.detail)).toEqual([
+      expect.stringContaining('Uploading thumbnail'),
+      expect.stringContaining('Thumbnail uploaded'),
+    ]);
+
+    // Launch still completes — the sub-step must not block the rest of the flow.
+    expect(events.filter((e) => e.type === 'complete')).toHaveLength(1);
+  });
+
+  it('thumbnail upload (failure): emits a warning detail and continues — launch still completes', async () => {
+    const file = new File([new Uint8Array([1, 2, 3])], 'thumb.jpg', { type: 'image/jpeg' });
+    vi.mocked(youtube.uploadThumbnail).mockRejectedValueOnce(
+      new Error('YouTube refused: quotaExceeded'),
+    );
+    const events: LaunchEvent[] = [];
+
+    await runLaunchSequence({
+      settings: makeSettings({ thumbnailFile: file }),
+      onEvent: (e) => events.push(e),
+    });
+
+    const broadcastDetails = events.filter(
+      (e) => e.type === 'step:detail' && e.stepId === 'broadcast',
+    ) as Extract<LaunchEvent, { type: 'step:detail' }>[];
+    expect(broadcastDetails.map((d) => d.detail)).toEqual([
+      expect.stringContaining('Uploading thumbnail'),
+      expect.stringContaining('Thumbnail upload failed'),
+    ]);
+    expect(broadcastDetails[1].detail).toContain('quotaExceeded');
+
+    // Failure must NOT abort. The launch still produces a complete event.
+    expect(events.filter((e) => e.type === 'complete')).toHaveLength(1);
+    // And step:done broadcast must still have fired (before the upload attempt).
+    expect(
+      events.find((e) => e.type === 'step:done' && e.stepId === 'broadcast'),
+    ).toBeDefined();
+  });
+
+  it('no thumbnailFile: uploadThumbnail is never called', async () => {
+    await runLaunchSequence({ settings: makeSettings(), onEvent: () => undefined });
+    expect(vi.mocked(youtube.uploadThumbnail)).not.toHaveBeenCalled();
   });
 });
 

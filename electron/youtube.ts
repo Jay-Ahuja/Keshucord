@@ -1,6 +1,12 @@
 import * as auth from './auth';
 
 const API_BASE = 'https://www.googleapis.com/youtube/v3';
+const UPLOAD_BASE = 'https://www.googleapis.com/upload/youtube/v3';
+
+// Thumbnail upload has its own (longer) per-attempt timeout. The file is
+// up to 2 MB and may take several seconds over a slow connection — the
+// 20 s default for JSON calls is too tight.
+const THUMBNAIL_UPLOAD_TIMEOUT_MS = 30_000;
 
 // Retry config for transient (network / 5xx / 429 / timeout) failures.
 // Only applied to *idempotent* operations — see CallInit.idempotent below.
@@ -368,6 +374,103 @@ export async function deleteLiveStream(streamId: string): Promise<void> {
     const url = new URL(`${API_BASE}/liveStreams`);
     url.searchParams.set('id', streamId);
     await callDelete(url.toString(), signal);
+  });
+}
+
+// ---- thumbnails.set (binary upload) ----
+
+/**
+ * Uploads a thumbnail image to YouTube for the given broadcast/video.
+ *
+ * Endpoint: `POST upload.googleapis.com/upload/youtube/v3/thumbnails/set
+ *   ?videoId={id}&uploadType=media`
+ * Content-Type: image/jpeg or image/png. Body: raw image bytes.
+ *
+ * Bypasses `call()` because the body is binary (not JSON) and uploads
+ * are explicitly NOT retryable here — re-issuing on a 5xx after YouTube
+ * already accepted the bytes wastes bandwidth + quota for no benefit
+ * (the next launch can just re-pick the same file if the user cares).
+ * Threads the same `withOperationAbort` registration as other ops so
+ * the launch orchestrator's cancel still unwinds in-flight uploads.
+ *
+ * `signal` is accepted for API parity with the rest of the module but
+ * is unused — the controller from `withOperationAbort` is what actually
+ * propagates from `cancelAllInFlight`.
+ */
+export async function uploadThumbnail(
+  videoId: string,
+  imageBuffer: Buffer,
+  mimeType: 'image/jpeg' | 'image/png',
+  _signal?: AbortSignal,
+): Promise<void> {
+  return withOperationAbort(async (signal) => {
+    log(`uploadThumbnail: videoId=${videoId} bytes=${imageBuffer.length} mime=${mimeType}`);
+    const token = await auth.getAccessToken();
+    if (!token) {
+      throw new Error('Not signed in to YouTube. Sign in from the login screen and try again.');
+    }
+
+    const url = new URL(`${UPLOAD_BASE}/thumbnails/set`);
+    url.searchParams.set('videoId', videoId);
+    url.searchParams.set('uploadType', 'media');
+
+    const attemptController = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      attemptController.abort();
+    }, THUMBNAIL_UPLOAD_TIMEOUT_MS);
+    const onOuterAbort = () => attemptController.abort();
+    signal.addEventListener('abort', onOuterAbort, { once: true });
+
+    let response: Response | null = null;
+    let attemptError: unknown = null;
+    try {
+      response = await fetch(url.toString(), {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': mimeType,
+          'content-length': String(imageBuffer.length),
+        },
+        // Node's `fetch` (undici) BodyInit doesn't accept Buffer directly
+        // under TS 5.7+ (Uint8Array gained an `ArrayBufferLike` parameter
+        // that the undici types don't match). Slice into a plain
+        // `ArrayBuffer`. Buffer's backing store is always an ArrayBuffer
+        // at runtime (never SharedArrayBuffer), but `Buffer.buffer` is
+        // typed as `ArrayBufferLike`, so we narrow via cast — the cast
+        // is sound, not a workaround.
+        body: imageBuffer.buffer.slice(
+          imageBuffer.byteOffset,
+          imageBuffer.byteOffset + imageBuffer.byteLength,
+        ) as ArrayBuffer,
+        signal: attemptController.signal,
+      });
+    } catch (err) {
+      attemptError = err;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onOuterAbort);
+    }
+
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+
+    if (response) {
+      if (response.ok) {
+        log(`uploadThumbnail: ok (${response.status})`);
+        return;
+      }
+      throw new Error(await explainError(response));
+    }
+
+    if (timedOut) {
+      throw new Error(
+        `Thumbnail upload timed out after ${THUMBNAIL_UPLOAD_TIMEOUT_MS / 1000}s — try a smaller image or check your connection.`,
+      );
+    }
+    throw attemptError instanceof Error
+      ? attemptError
+      : new Error(String(attemptError ?? 'Unknown failure during thumbnail upload.'));
   });
 }
 

@@ -223,6 +223,37 @@ async function _runLaunchSequence(
     log('broadcast id:', broadcast.id);
     onEvent({ type: 'broadcast-created', broadcast });
 
+    // 3a. Optional, best-effort thumbnail upload. Runs OUTSIDE the run()
+    //     wrapper so the broadcast step's step:done has already fired;
+    //     the UI shows a detail line on the now-closed broadcast row.
+    //     A thumbnail failure must NEVER abort the launch — emit a
+    //     step:detail warning and continue. NOT a new entry in
+    //     LAUNCH_STEPS (the user-facing 10-step ring stays unchanged).
+    if (settings.thumbnailFile) {
+      onEvent({
+        type: 'step:detail',
+        stepId: 'broadcast',
+        detail: 'Uploading thumbnail to YouTube…',
+      });
+      try {
+        await youtube.uploadThumbnail(broadcast.id, settings.thumbnailFile);
+        log('thumbnail uploaded for broadcast', broadcast.id);
+        onEvent({
+          type: 'step:detail',
+          stepId: 'broadcast',
+          detail: 'Thumbnail uploaded.',
+        });
+      } catch (thumbErr) {
+        const msg = thumbErr instanceof Error ? thumbErr.message : String(thumbErr);
+        console.warn('[launch] thumbnail upload failed (non-fatal):', msg);
+        onEvent({
+          type: 'step:detail',
+          stepId: 'broadcast',
+          detail: `Thumbnail upload failed: ${msg} — broadcast continues without it.`,
+        });
+      }
+    }
+
     // 4. Create the YouTube live stream (the ingestion endpoint).
     stream = await run('stream', () => youtube.createLiveStream(settings));
     log('stream id:', stream.id);

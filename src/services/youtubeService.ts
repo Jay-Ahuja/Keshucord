@@ -112,6 +112,27 @@ export async function deleteLiveStream(streamId: string): Promise<void> {
 }
 
 /**
+ * Upload a thumbnail image for an existing broadcast. Reads the File
+ * into a Uint8Array on the renderer side and hands the raw bytes across
+ * IPC. The mime type is validated against the JPEG/PNG allowlist YouTube
+ * accepts — `File.type` is a string with no compile-time guarantee, so
+ * unknown values raise instead of silently being upcast.
+ *
+ * Best-effort: the launch orchestrator calls this and tolerates failure
+ * with a `step:detail` warning rather than aborting the launch.
+ */
+export async function uploadThumbnail(videoId: string, file: File): Promise<void> {
+  const mimeType = file.type;
+  if (mimeType !== 'image/jpeg' && mimeType !== 'image/png') {
+    throw new Error(
+      `Unsupported thumbnail file type "${mimeType || '<unknown>'}". YouTube accepts JPEG or PNG.`,
+    );
+  }
+  const buffer = await file.arrayBuffer();
+  await window.keshucord.youtube.uploadThumbnail(videoId, new Uint8Array(buffer), mimeType);
+}
+
+/**
  * Best-effort interrupt of any in-flight YouTube fetches running in the main
  * process. The launch orchestrator calls this when its AbortSignal fires so
  * that aborts don't have to wait out a stalled API request. Safe to call when

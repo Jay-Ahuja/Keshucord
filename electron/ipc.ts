@@ -46,6 +46,20 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('youtube:delete-stream', (_e, streamId: string) =>
     youtube.deleteLiveStream(streamId),
   );
+  // Thumbnail upload: image bytes cross IPC as a Uint8Array (Electron's
+  // structured-clone algorithm preserves them). We coerce to Buffer in
+  // the handler so the main-process fetch can hand it straight to
+  // `body: Buffer`. mimeType narrowing is done in the renderer-side
+  // facade; main re-validates because IPC is a trust boundary.
+  ipcMain.handle(
+    'youtube:upload-thumbnail',
+    (_e, videoId: string, imageData: Uint8Array, mimeType: string) => {
+      if (mimeType !== 'image/jpeg' && mimeType !== 'image/png') {
+        throw new Error(`Unsupported thumbnail mime type "${mimeType}". Use JPEG or PNG.`);
+      }
+      return youtube.uploadThumbnail(videoId, Buffer.from(imageData), mimeType);
+    },
+  );
   // Renderer-driven abort: AbortSignal can't cross IPC, so when the launch
   // orchestrator aborts we instead fire this channel to interrupt any
   // in-flight YouTube fetches on the main side.
