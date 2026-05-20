@@ -5,6 +5,7 @@ import {
   HomeIcon,
   PlusIcon,
   SettingsIcon,
+  SignOutIcon,
 } from './Icons';
 import type { OBSConnectionState, OBSConnectionStatus, Screen, YouTubeUser } from '../types';
 import { initialsOf } from '../utils/format';
@@ -145,19 +146,18 @@ export function Sidebar({
             </div>
           )}
         </div>
+        {/*
+          The profile area is now a non-interactive display. Sign-out lives
+          on the dedicated `.btn.ghost.icon.sm` button alongside it. The
+          inline `cursor` + `background` overrides defeat `.acct`'s
+          interactive treatment (cursor: pointer + hover bg from
+          keshucord.css §account) without modifying the design system
+          stylesheet.
+        */}
         <div
           className="acct"
-          onClick={onSignOut}
-          role="button"
-          tabIndex={0}
-          title="Sign out"
-          aria-label={`Signed in as ${user.name} — click to sign out`}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              onSignOut();
-            }
-          }}
+          aria-label={`Signed in as ${user.name}`}
+          style={{ cursor: 'default', background: 'transparent' }}
         >
           {user.avatarUrl ? (
             <img
@@ -185,6 +185,16 @@ export function Sidebar({
             <b>{user.name}</b>
             <span>{user.email}</span>
           </div>
+          <button
+            type="button"
+            className="btn ghost icon sm"
+            onClick={onSignOut}
+            title="Sign out"
+            aria-label="Sign out"
+            style={{ marginLeft: 'auto', flexShrink: 0 }}
+          >
+            <SignOutIcon />
+          </button>
         </div>
       </div>
     </aside>
