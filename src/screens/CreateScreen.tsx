@@ -1,4 +1,4 @@
-import { useCallback, useId, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   ArrowRightIcon,
   BoltIcon,
@@ -93,11 +93,28 @@ export default function CreateScreen({ user, value, onChange, onSubmit }: Props)
   //     Per the integration plan these are visible for visual completeness but
   //     don't persist anywhere; they reset whenever the user leaves the screen.
   const [preset, setPreset] = useState('gameplay');
-  const [thumbFilled, setThumbFilled] = useState(false);
   const [tags, setTags] = useState('');
   const [schedule, setSchedule] = useState<'now' | 'later'>('now');
   const [notify, setNotify] = useState(true);
   const [showAdv, setShowAdv] = useState(false);
+
+  // Thumbnail picker. `value.thumbnailFile` is the persisted (in-memory)
+  // File on StreamSettings; `previewUrl` is derived locally because object
+  // URLs are tied to the renderer's lifecycle, not to a serialisable state.
+  // We regenerate the preview URL whenever the File on `value` changes, and
+  // revoke the prior URL to avoid the well-known browser-memory leak.
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!value.thumbnailFile) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(value.thumbnailFile);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [value.thumbnailFile]);
+  const thumbFilled = previewUrl !== null;
 
   const titleId = useId();
   const descId = useId();
@@ -109,6 +126,37 @@ export default function CreateScreen({ user, value, onChange, onSubmit }: Props)
   // Real fields → flow back through onChange.
   const update = <K extends keyof StreamSettings>(key: K, next: StreamSettings[K]) =>
     onChange({ ...value, [key]: next });
+
+  const handleThumbnailPick = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+  const handleThumbnailChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0] ?? null;
+      // Defensive — the accept attribute filters in the picker UI, but
+      // drag-drop on platforms that ignore `accept` can still hand us a
+      // GIF/SVG/etc. YouTube only takes JPEG and PNG.
+      if (file && file.type !== 'image/jpeg' && file.type !== 'image/png') {
+        console.warn('[create] thumbnail picker rejected non-JPEG/PNG:', file.type);
+        update('thumbnailFile', undefined);
+      } else {
+        update('thumbnailFile', file ?? undefined);
+      }
+      // Allow re-selecting the same file (input.onChange doesn't fire if
+      // the value is identical to last time).
+      e.target.value = '';
+    },
+    [update],
+  );
+  const handleThumbnailRemove = useCallback(
+    (e: React.MouseEvent) => {
+      // Stop the click from bubbling to .thumb-drop, which would re-open
+      // the picker on the same click.
+      e.stopPropagation();
+      update('thumbnailFile', undefined);
+    },
+    [update],
+  );
 
   // If the saved category isn't one of the design's predefined options,
   // include it as a leading select option so we don't silently drop it.
@@ -280,35 +328,81 @@ export default function CreateScreen({ user, value, onChange, onSubmit }: Props)
             ))}
           </div>
 
-          {/* Thumbnail (mock UI) */}
+          {/* Thumbnail (real file picker) */}
           <div className="card pad fadein d2">
             <h3>
-              Thumbnail <span className="tag">1920×1080 · PNG/JPG</span>
+              Thumbnail <span className="tag">1920×1080 · PNG/JPG · up to 2 MB</span>
             </h3>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png"
+              onChange={handleThumbnailChange}
+              style={{ display: 'none' }}
+            />
             <div
               className={'thumb-drop' + (thumbFilled ? ' filled' : '')}
-              onClick={() => setThumbFilled((v) => !v)}
+              onClick={handleThumbnailPick}
               role="button"
               tabIndex={0}
+              title={thumbFilled ? 'Click to choose a different image' : 'Click to choose an image'}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
-                  setThumbFilled((v) => !v);
+                  handleThumbnailPick();
                 }
               }}
+              style={thumbFilled ? { padding: 0, overflow: 'hidden' } : undefined}
             >
-              {!thumbFilled && (
+              {thumbFilled && previewUrl ? (
+                <img
+                  src={previewUrl}
+                  alt="Selected thumbnail preview"
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                />
+              ) : (
                 <>
                   <div className="ic">
                     <UploadIcon className="h-6 w-6" />
                   </div>
                   <div>Drop an image or click to upload</div>
-                  <div className="sm">
-                    drag · or · click to mock
-                  </div>
+                  <div className="sm">JPEG · PNG · up to 2 MB</div>
                 </>
               )}
             </div>
+            {value.thumbnailFile && (
+              <div
+                className="row"
+                style={{ marginTop: 8, fontSize: 12, color: 'var(--fg-mute)' }}
+              >
+                <span
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    flex: 1,
+                  }}
+                  title={value.thumbnailFile.name}
+                >
+                  {value.thumbnailFile.name}{' '}
+                  <span style={{ color: 'var(--fg-ghost)' }}>
+                    · {(value.thumbnailFile.size / 1024).toFixed(0)} KB
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  onClick={handleThumbnailRemove}
+                >
+                  Remove
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Details (real) */}
@@ -552,9 +646,24 @@ export default function CreateScreen({ user, value, onChange, onSubmit }: Props)
             </h3>
             <div
               className={'thumb-drop' + (thumbFilled ? ' filled' : '')}
-              style={{ aspectRatio: '16/9', cursor: 'default' }}
+              style={{
+                aspectRatio: '16/9',
+                cursor: 'default',
+                ...(thumbFilled ? { padding: 0, overflow: 'hidden' } : {}),
+              }}
             >
-              {!thumbFilled && (
+              {thumbFilled && previewUrl ? (
+                <img
+                  src={previewUrl}
+                  alt=""
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                />
+              ) : (
                 <div className="ph-label mono dim">thumbnail goes here</div>
               )}
             </div>
