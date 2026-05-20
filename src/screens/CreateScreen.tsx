@@ -18,7 +18,9 @@ import type {
   StreamSettings,
   YouTubeUser,
 } from '../types';
+import { formatDatePrefix } from '../utils/format';
 import { useObsStatus } from '../utils/useObsStatus';
+import { useSettings } from '../utils/settingsContext';
 
 interface Props {
   user: YouTubeUser;
@@ -88,6 +90,55 @@ function obsPreflight(state: OBSConnectionState): PreflightRow {
 
 export default function CreateScreen({ user, value, onChange, onSubmit }: Props) {
   const obsStatus = useObsStatus();
+  const { settings: userSettings } = useSettings();
+
+  // --- titleDatePrefix mount effect.
+  //
+  // When `userSettings.titleDatePrefix` is on, prepend today's `M/D/YYYY - `
+  // to the title field exactly once per CreateScreen mount, as long as the
+  // title doesn't already start with today's date.
+  //
+  // Why a useRef guard:
+  // - StrictMode double-mounts every component in dev, which would otherwise
+  //   trigger the prefix logic twice. The second pass would see the already-
+  //   prefixed value and (because of the duplicate-prefix check) skip — but
+  //   that's load-bearing and easy to break, so the ref guards it explicitly.
+  // - Re-mount on Settings → Create navigation is desired behavior: each visit
+  //   re-applies the prefix based on the current date and current toggle, so
+  //   a user who flips the toggle and navigates back gets the expected result.
+  //
+  // We read `userSettings` / `value` / `onChange` via refs so the empty-deps
+  // closure can never see a stale value or pin an old `onChange` identity.
+  const userSettingsRef = useRef(userSettings);
+  const valueRef = useRef(value);
+  const onChangeRef = useRef(onChange);
+  useEffect(() => {
+    userSettingsRef.current = userSettings;
+  }, [userSettings]);
+  useEffect(() => {
+    valueRef.current = value;
+  }, [value]);
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
+  const datePrefixAppliedRef = useRef(false);
+  useEffect(() => {
+    if (datePrefixAppliedRef.current) return;
+    datePrefixAppliedRef.current = true;
+    if (!userSettingsRef.current.titleDatePrefix) return;
+    const todayPrefix = formatDatePrefix();
+    const currentTitle = valueRef.current.title;
+    // Idempotency: if the title already starts with today's date, leave it
+    // alone — the user has already seen and (possibly) edited the prefix.
+    // We deliberately don't strip a stale prefix from a previous day; the
+    // user controls the title once it's been seeded.
+    if (currentTitle.startsWith(todayPrefix)) return;
+    onChangeRef.current({
+      ...valueRef.current,
+      title: `${todayPrefix} - ${currentTitle}`,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // --- Mock-only UI state for design fields not backed by real settings yet.
   //     Per the integration plan these are visible for visual completeness but

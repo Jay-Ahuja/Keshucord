@@ -15,6 +15,13 @@ export interface UserSettings {
   defaultDescription: string;
   defaultPrivacy: Privacy;
   defaultCategory: string;
+  /**
+   * When true, the Create screen auto-prepends today's date (M/D/YYYY)
+   * followed by " - " to the stream title on mount. The prefix is editable
+   * plain text after insertion — it is not a separate field and is not
+   * re-locked. Surfaced in Settings → Stream defaults.
+   */
+  titleDatePrefix: boolean;
 
   // Appearance — surfaced in the Keshucord redesign's Settings → Appearance tab.
   // Phase A introduces the shape; later phases wire the UI. Defaults match the
@@ -32,6 +39,7 @@ export const DEFAULT_USER_SETTINGS: UserSettings = {
   defaultDescription: '',
   defaultPrivacy: 'public',
   defaultCategory: '',
+  titleDatePrefix: false,
   appearanceAccent: 'purple',
   appearanceDensity: 'comfortable',
   appearanceReduceMotion: false,

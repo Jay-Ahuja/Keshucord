@@ -10,6 +10,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 > Changes on the current branch not yet on `main`.
 
 ### Added
+- Settings → Stream defaults gains a "Prepend today's date to stream
+  title" toggle. When on, CreateScreen prepends `M/D/YYYY - ` to the
+  title on mount (with a duplicate-prefix guard so re-mounting doesn't
+  stack the date, and a `useRef` guard so React StrictMode's dev-only
+  double-mount doesn't apply it twice). The inserted prefix is editable
+  plain text — once seeded it behaves like any other characters in the
+  title. New `UserSettings.titleDatePrefix` field flows through all four
+  schema files (renderer type, main-process `PersistedSettings`, preload
+  `PersistedSettingsPayload`, and the `normalize()` Boolean coercion);
+  new `formatDatePrefix()` helper in `src/utils/format.ts` uses Date
+  builtins rather than `Intl.DateTimeFormat` so the M/D/YYYY contract
+  doesn't drift in non-en-US locales.
 - OBS pre-flight: clicking Go Live now detects whether OBS Studio is
   running via a fast WebSocket probe before the launch sequence starts.
   If OBS isn't reachable, a dialog offers to launch OBS automatically

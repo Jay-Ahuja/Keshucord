@@ -457,6 +457,23 @@ function DefaultsTab({
           />
         </div>
       </div>
+
+      <div className="set-row">
+        <div className="info">
+          <b>Prepend today's date to stream title</b>
+          <p>
+            Inserts <span className="mono">M/D/YYYY -&nbsp;</span> in front of the title when you
+            open the New Stream form. The prefix is editable plain text — tweak it or delete it
+            like any other part of the title.
+          </p>
+        </div>
+        <div className="set-control">
+          <Switch
+            on={settings.titleDatePrefix}
+            onChange={() => update('titleDatePrefix', !settings.titleDatePrefix)}
+          />
+        </div>
+      </div>
     </div>
   );
 }
