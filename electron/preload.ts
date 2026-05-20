@@ -95,6 +95,19 @@ const api = {
       ipcRenderer.invoke('youtube:delete-broadcast', broadcastId),
     deleteLiveStream: (streamId: string): Promise<void> =>
       ipcRenderer.invoke('youtube:delete-stream', streamId),
+    /**
+     * Upload a JPEG or PNG thumbnail for the given broadcast/video.
+     * `imageData` is the raw image bytes; Electron structured-clones
+     * Uint8Array correctly across IPC. Single-attempt (no retry on the
+     * main side) so a transient 5xx surfaces immediately rather than
+     * doubling the upload cost.
+     */
+    uploadThumbnail: (
+      videoId: string,
+      imageData: Uint8Array,
+      mimeType: 'image/jpeg' | 'image/png',
+    ): Promise<void> =>
+      ipcRenderer.invoke('youtube:upload-thumbnail', videoId, imageData, mimeType),
     /** Aborts every in-flight YouTube request currently running in main. */
     cancel: (): Promise<void> => ipcRenderer.invoke('youtube:cancel'),
   },

@@ -28,6 +28,18 @@ export interface KeshucordAPI {
     transitionToComplete(broadcastId: string): Promise<void>;
     deleteBroadcast(broadcastId: string): Promise<void>;
     deleteLiveStream(streamId: string): Promise<void>;
+    /**
+     * Upload a JPEG/PNG thumbnail for an existing broadcast. The image
+     * bytes are passed as a `Uint8Array`; Electron's structured-clone
+     * algorithm preserves typed arrays across IPC. Single-attempt on the
+     * main side — the renderer should not assume retry on transient
+     * errors. Used by the launch flow's best-effort sub-step after step 3.
+     */
+    uploadThumbnail(
+      videoId: string,
+      imageData: Uint8Array,
+      mimeType: 'image/jpeg' | 'image/png',
+    ): Promise<void>;
     /** Aborts every in-flight YouTube request currently running in main. */
     cancel(): Promise<void>;
   };
